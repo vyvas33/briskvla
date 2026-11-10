@@ -6,8 +6,8 @@ Original LeRobot README: [README_LEROBOT.md](README_LEROBOT.md)
 ## Setup (Linux + NVIDIA GPU; LIBERO doesn't install on macOS)
 
 ```bash
-git clone https://github.com/vyvas33/lerobot.git
-cd lerobot
+git clone https://github.com/vyvas33/briskvla.git
+cd briskvla
 git switch briskvla
 uv sync --locked --extra smolvla --extra libero
 uv run hf auth login
