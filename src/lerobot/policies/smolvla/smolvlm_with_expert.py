@@ -81,6 +81,7 @@ class SmolVLMWithExpertModel(nn.Module):
         attention_mode: str = "self_attn",
         num_expert_layers: int = -1,
         num_vlm_layers: int = -1,
+        expert_vlm_layers: list[int] | None = None,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
         device: str = "auto",
@@ -104,32 +105,38 @@ class SmolVLMWithExpertModel(nn.Module):
             self.get_vlm_model().text_model.layers = self.get_vlm_model().text_model.layers[:num_vlm_layers]
         self.num_vlm_layers = len(self.get_vlm_model().text_model.layers)
         self.config = config
+
+        if num_expert_layers > 0:
+            raise ValueError("num_expert_layers is not supported in BriskVLA. Use expert_vlm_layers instead")
+
+        # Depth of each expert layer. Default is one expert layer per VLM layer, like the teacher.
+        if expert_vlm_layers is None:
+            self.expert_vlm_layers = list(range(self.num_vlm_layers))
+        else:
+            self.expert_vlm_layers = list(expert_vlm_layers)
+
         # Smaller lm expert
         lm_expert_config = copy.deepcopy(config.text_config)
         hidden_size = lm_expert_config.hidden_size
         lm_expert_config.hidden_size = int(hidden_size * expert_width_multiplier)  # hidden_size // 2
         lm_expert_config.intermediate_size = get_intermediate_size(int(hidden_size * expert_width_multiplier))
-        lm_expert_config.num_hidden_layers = self.num_vlm_layers
-        if num_expert_layers > 0:
-            assert len(self.get_vlm_model().text_model.layers) % num_expert_layers == 0, (
-                f"Number of layers in the VLM {len(self.get_vlm_model().text_model.layers)} are not multiple of num_expert_layers {num_expert_layers}"
-            )
-            lm_expert_config.num_hidden_layers = num_expert_layers
+        lm_expert_config.num_hidden_layers = len(self.expert_vlm_layers)
         self.lm_expert = AutoModel.from_config(lm_expert_config)
 
         self.num_expert_layers = len(self.lm_expert.layers)
         self.self_attn_every_n_layers = self_attn_every_n_layers
         if "cross" in attention_mode:
             # Reshape qkv projections to have the same input dimension as the vlm
-            for layer_idx in range(len(self.lm_expert.layers)):
-                if self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0:
+            # Use the depth to pick the attention type, the same way forward() does
+            for j, vlm_layer in enumerate(self.expert_vlm_layers):
+                if self.self_attn_every_n_layers > 0 and vlm_layer % self.self_attn_every_n_layers == 0:
                     continue
-                self.lm_expert.layers[layer_idx].self_attn.k_proj = nn.Linear(
+                self.lm_expert.layers[j].self_attn.k_proj = nn.Linear(
                     config.text_config.num_key_value_heads * config.text_config.head_dim,
                     lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
                     bias=lm_expert_config.attention_bias,
                 )
-                self.lm_expert.layers[layer_idx].self_attn.v_proj = nn.Linear(
+                self.lm_expert.layers[j].self_attn.v_proj = nn.Linear(
                     config.text_config.num_key_value_heads * config.text_config.head_dim,
                     lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
                     bias=lm_expert_config.attention_bias,
@@ -398,17 +405,11 @@ class SmolVLMWithExpertModel(nn.Module):
         return att_outputs, past_key_values
 
     def get_model_layers(self, models: list) -> list:
-        vlm_layers = []
-        expert_layers = []
-        multiple_of = self.num_vlm_layers // self.num_expert_layers
-        for i in range(self.num_vlm_layers):
-            if multiple_of > 0 and i > 0 and i % multiple_of != 0:
-                expert_layer = None
-            else:
-                expert_layer_index = i // multiple_of if multiple_of > 0 else i
-                expert_layer = models[1].layers[expert_layer_index]
-            vlm_layers.append(models[0].layers[i])
-            expert_layers.append(expert_layer)
+        # One entry per depth. Depths without an expert layer get None.
+        vlm_layers = list(models[0].layers)
+        expert_layers = [None] * self.num_vlm_layers
+        for j, vlm_layer in enumerate(self.expert_vlm_layers):
+            expert_layers[vlm_layer] = models[1].layers[j]
         return [vlm_layers, expert_layers]
 
     def forward(
@@ -446,6 +447,10 @@ class SmolVLMWithExpertModel(nn.Module):
         num_layers = self.num_vlm_layers
         head_dim = self.vlm.config.text_config.head_dim
         for layer_idx in range(num_layers):
+            # During denoising the prefix is cached and only the action tokens come in.
+            # If this depth has no expert layer there is nothing to run.
+            if inputs_embeds[0] is None and model_layers[1][layer_idx] is None:
+                continue
             if (
                 fill_kv_cache
                 or "cross" not in self.attention_mode

@@ -95,6 +95,9 @@ class SmolVLAConfig(PreTrainedConfig):
 
     num_expert_layers: int = -1  # Less or equal to 0 is the default where the action expert has the same number of layers of VLM. Otherwise the expert have less layers.
     num_vlm_layers: int = 16  # Number of layers used in the VLM (first num_vlm_layers layers)
+    # Expert layer j runs next to VLM layer expert_vlm_layers[j] and reads its keys and values.
+    # All VLM layers still run. None puts an expert layer at every depth, like the teacher.
+    expert_vlm_layers: list[int] | None = None
     self_attn_every_n_layers: int = 2  # Interleave SA layers each self_attn_every_n_layers
     expert_width_multiplier: float = 0.75  # The action expert hidden size (wrt to the VLM)
 
@@ -120,6 +123,22 @@ class SmolVLAConfig(PreTrainedConfig):
             raise NotImplementedError(
                 "`use_delta_joint_actions_aloha` is used by smolvla for aloha real models. It is not ported yet in LeRobot."
             )
+        if self.expert_vlm_layers is not None:
+            layers = self.expert_vlm_layers
+            if self.num_expert_layers > 0:
+                raise ValueError(
+                    "Set either `expert_vlm_layers` or `num_expert_layers`, not both. "
+                    f"Got {layers} and {self.num_expert_layers}."
+                )
+            if len(layers) == 0:
+                raise ValueError("`expert_vlm_layers` must contain at least one layer index.")
+            if not all(a < b for a, b in zip(layers, layers[1:], strict=False)):
+                raise ValueError(f"`expert_vlm_layers` must be strictly increasing. Got {layers}.")
+            if layers[0] < 0 or layers[-1] >= self.num_vlm_layers:
+                raise ValueError(
+                    f"`expert_vlm_layers` must be in [0, {self.num_vlm_layers}) "
+                    f"(num_vlm_layers={self.num_vlm_layers}). Got {layers}."
+                )
 
     def validate_features(self) -> None:
         if self.input_features is None:
