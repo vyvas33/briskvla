@@ -147,8 +147,9 @@ EOF
     fi
     # Remove what an interrupted run left behind
     rm -rf "$SUITE_DIR"
-    echo "=== $NAME K=$K $SUITE ==="
-    if ! uv run --no-sync lerobot-eval \
+    echo "=== $NAME K=$K $SUITE, started $(date +%H:%M) ==="
+    # Output goes only to the log file. The progress bar redraws every step, which freezes Colab.
+    if uv run --no-sync lerobot-eval \
       --policy.path="$POLICY_DIR" \
       --policy.device=cuda \
       --policy.num_steps="$K" \
@@ -160,7 +161,9 @@ EOF
       --eval.n_episodes="$EPISODES" \
       --eval.use_async_envs="$ASYNC" \
       --seed="$SEED" \
-      --output_dir="$SUITE_DIR" 2>&1 | tee "$RUN_DIR/$SUITE.log"; then
+      --output_dir="$SUITE_DIR" > "$RUN_DIR/$SUITE.log" 2>&1; then
+      echo "$(grep -ao 'Success rate[^)]*)' "$RUN_DIR/$SUITE.log" | tail -n 1), finished $(date +%H:%M)"
+    else
       echo "[failed] $NAME K=$K $SUITE, log in $RUN_DIR/$SUITE.log"
       FAILED+=("K=$K $SUITE")
     fi
