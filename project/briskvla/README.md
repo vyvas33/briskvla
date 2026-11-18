@@ -16,6 +16,10 @@ revision used for the LIBERO teacher evaluation.
 | `src/lerobot/policies/smolvla/smolvlm_with_expert.py` | Places expert layers at the chosen depths |
 | `project/briskvla/build_student.py` | Builds a student checkpoint from the teacher |
 | `project/briskvla/test_student.py` | Tests for the above |
+| `project/briskvla/latency.py` | Inference latency per action chunk, split into prefix and denoising |
+| `project/briskvla/run_eval.sh` | Latency and LIBERO success for one model, with fixed settings |
+| `project/briskvla/summarize_eval.py` | Success table for all evaluated models |
+| `project/briskvla/eval_colab.ipynb` | Runs `run_eval.sh` on Colab |
 
 ## Expert layout
 
@@ -134,3 +138,57 @@ teacher with random inputs, so no dataset is needed. They take about a minute on
 | `test_k8_student_runs` | `sample_actions` returns shape (1, 50, 32) with finite values |
 | `test_only_expert_side_trains` | Only expert layers and action projections have `requires_grad` |
 | `test_save_and_reload` | The saved folder loads with `from_pretrained`, keeps `expert_vlm_layers`, has the processor files and gives the same actions |
+
+## Evaluation
+
+Every model is evaluated with `run_eval.sh`, so all numbers use the same settings: batch size 5 with
+parallel environments, seed 1000, 10 episodes per task, `empty_cameras=1`, and K = 10 and 3
+denoising steps. It needs Linux and an NVIDIA GPU.
+
+```bash
+project/briskvla/run_eval.sh teacher teacher                          # the teacher
+project/briskvla/run_eval.sh k8_pairs_distilled path/to/checkpoint    # any other model
+```
+
+The script first syncs packages and writes `~/.libero/config.yaml` if it is missing. Both steps are
+skipped when already done, or entirely with `SKIP_SETUP=1`. It then measures latency with
+`latency.py` and runs `lerobot-eval` on each suite. Results go to:
+
+```
+outputs/latency/<name>__<gpu>.json
+outputs/eval/<name>_K<steps>/run_metadata.json
+outputs/eval/<name>_K<steps>/<suite>/eval_info.json
+outputs/eval/<name>_K<steps>/<suite>.log
+```
+
+Finished suites are skipped, so after a crash the same command continues where it stopped. Settings
+are environment variables, listed at the top of the script. A quick check with one episode per task:
+
+```bash
+STEPS=10 SUITES=libero_spatial EPISODES=1 LATENCY=0 project/briskvla/run_eval.sh smoke teacher
+```
+
+`LATENCY=0` skips the latency measurement and `SUCCESS=0` skips the LIBERO evals.
+
+We measure latency only on the RTX 3080 laptop and task success only on Colab, so that each metric
+comes from one machine type for every model. On Colab, open `eval_colab.ipynb`, set the model in the
+Config cell and run all cells. It runs the success evals with latency off and saves results to Google
+Drive. If rendering fails (for example under WSL), try `MUJOCO_GL=osmesa`.
+
+`summarize_eval.py` prints the success table for every run under `outputs/eval` and saves it to
+`summary.json`.
+
+### Latency
+
+`latency.py` times one `predict_action_chunk` call at batch size 1, with the same settings as the
+eval. The prefix is everything before the first denoising step, timed with CUDA events around each
+step. A line fit of total time over K = 1, 2, 3, 5, 10 is saved as a cross-check, along with exact
+FLOPs for the prefix and for each step. Several models can be measured in one run. They are timed in
+alternating rounds so that GPU temperature affects all of them equally:
+
+```bash
+uv run python project/briskvla/latency.py \
+    --policy teacher=outputs/checkpoints/smolvla_libero_a24f1f38 \
+    --policy k8_pairs=outputs/students/k8_pairs \
+    --out outputs/latency/rtx3080.json
+```
