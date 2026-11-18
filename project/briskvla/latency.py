@@ -1,0 +1,267 @@
+"""Measure SmolVLA inference latency per action chunk, split into prefix and denoising.
+
+One action chunk is one predict_action_chunk call at batch size 1. The prefix is everything before
+the first denoising step (image preprocessing, vision encoder, VLM pass that fills the KV cache).
+Denoising is the K expert passes. Settings match lerobot-eval: empty_cameras=1, TF32 on, no AMP.
+
+Models are measured in alternating rounds so that GPU temperature drift affects all of them equally.
+Any SmolVLA checkpoint works, including students from build_student.py.
+
+Example:
+    uv run python project/briskvla/latency.py \
+        --policy teacher=lerobot/smolvla_libero \
+        --policy k8_pairs=outputs/students/k8_pairs \
+        --out outputs/latency/rtx3080.json
+"""
+
+import argparse
+import json
+import platform
+import statistics
+import subprocess
+import time
+from pathlib import Path
+
+import torch
+from build_student import TEACHER, TEACHER_REVISION
+from torch.utils.flop_counter import FlopCounterMode
+
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
+from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
+
+
+def load_policy(path: str, device: str) -> SmolVLAPolicy:
+    revision = TEACHER_REVISION if path == TEACHER else None
+    config = PreTrainedConfig.from_pretrained(path, revision=revision)
+    config.device = device
+    config.empty_cameras = 1
+    policy = SmolVLAPolicy.from_pretrained(path, config=config, revision=revision)
+    policy.eval()
+    return policy
+
+
+def make_batch(policy: SmolVLAPolicy, seed: int = 0) -> dict:
+    """Random inputs in the format the preprocessor hands to the policy. Latency does not depend on
+    the values, and the instruction is always padded to tokenizer_max_length."""
+    cfg = policy.config
+    g = torch.Generator().manual_seed(seed)
+    batch = {}
+    for key, feature in cfg.image_features.items():
+        if "empty_camera" in key:
+            continue
+        batch[key] = torch.rand(1, *feature.shape, generator=g)
+    batch[OBS_STATE] = torch.randn(1, *cfg.robot_state_feature.shape, generator=g)
+    batch[OBS_LANGUAGE_TOKENS] = torch.randint(0, 1000, (1, cfg.tokenizer_max_length), generator=g)
+    batch[OBS_LANGUAGE_ATTENTION_MASK] = torch.ones(1, cfg.tokenizer_max_length, dtype=torch.bool)
+    return {k: v.to(cfg.device) for k, v in batch.items()}
+
+
+class ChunkTimer:
+    """Times predict_action_chunk and the denoising steps inside it.
+
+    On CUDA the split uses CUDA events, which add no synchronization. On other devices each mark
+    synchronizes, which slows things down a little, so treat those numbers as a code check only.
+    """
+
+    def __init__(self, policy: SmolVLAPolicy):
+        self.policy = policy
+        self.device = torch.device(policy.config.device)
+        self.steps = []
+        denoise_step = policy.model.denoise_step
+
+        def timed_denoise_step(*args, **kwargs):
+            start = self._mark()
+            out = denoise_step(*args, **kwargs)
+            self.steps.append((start, self._mark()))
+            return out
+
+        # sample_actions looks up self.denoise_step at call time, so this replaces it
+        policy.model.denoise_step = timed_denoise_step
+
+    def _sync(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.synchronize()
+
+    def _mark(self):
+        if self.device.type == "cuda":
+            event = torch.cuda.Event(enable_timing=True)
+            event.record()
+            return event
+        self._sync()
+        return time.perf_counter()
+
+    def _ms(self, start, end) -> float:
+        if self.device.type == "cuda":
+            return start.elapsed_time(end)
+        return (end - start) * 1000
+
+    def __call__(self, batch: dict) -> dict:
+        self.policy.reset()
+        self.steps = []
+        self._sync()
+        wall_start = time.perf_counter()
+        start = self._mark()
+        self.policy.predict_action_chunk(batch)
+        end = self._mark()
+        self._sync()
+        wall_ms = (time.perf_counter() - wall_start) * 1000
+
+        first_step = self.steps[0][0]
+        last_step = self.steps[-1][1]
+        prefix_ms = self._ms(start, first_step)
+        denoise_ms = self._ms(first_step, last_step)
+        return {
+            "wall_ms": wall_ms,
+            "prefix_ms": prefix_ms,
+            "denoise_ms": denoise_ms,
+            "other_ms": self._ms(start, end) - prefix_ms - denoise_ms,
+        }
+
+
+def count_flops(policy: SmolVLAPolicy, batch: dict) -> dict:
+    """FLOPs per chunk. Running with 1 and 2 steps gives the prefix and per-step cost exactly."""
+    totals = {}
+    for steps in (1, 2):
+        policy.config.num_steps = steps
+        policy.reset()
+        with FlopCounterMode(display=False) as counter:
+            policy.predict_action_chunk(batch)
+        totals[steps] = counter.get_total_flops()
+    per_step = totals[2] - totals[1]
+    return {"prefix": totals[1] - per_step, "per_step": per_step}
+
+
+def summarize(samples: list[dict]) -> dict:
+    wall = sorted(s["wall_ms"] for s in samples)
+    out = {key: statistics.median(s[key] for s in samples) for key in samples[0]}
+    out["wall_ms_p90"] = wall[int(0.9 * (len(wall) - 1))]
+    out["expert_share"] = out["denoise_ms"] / (out["prefix_ms"] + out["denoise_ms"] + out["other_ms"])
+    return out
+
+
+def gpu_state() -> dict | None:
+    fields = "name,driver_version,clocks.sm,clocks.max.sm,temperature.gpu,power.draw"
+    try:
+        line = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()[0]
+    except (FileNotFoundError, subprocess.CalledProcessError, IndexError):
+        return None
+    return dict(zip(fields.split(","), (x.strip() for x in line.split(",")), strict=False))
+
+
+def git_commit() -> str | None:
+    result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    return result.stdout.strip() or None
+
+
+def parse_policy_arg(arg: str) -> tuple[str, str]:
+    if "=" in arg:
+        name, path = arg.split("=", 1)
+        return name, path
+    return Path(arg).name, arg
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--policy",
+        action="append",
+        required=True,
+        help="NAME=PATH, Hub id or local checkpoint folder. Repeat for several models.",
+    )
+    parser.add_argument("--steps", type=int, nargs="+", default=[1, 2, 3, 5, 10], help="Denoising steps K")
+    parser.add_argument("--warmup", type=int, default=20, help="Untimed calls per model and K")
+    parser.add_argument("--iters", type=int, default=100, help="Timed calls per model and K")
+    parser.add_argument("--rounds", type=int, default=5, help="Alternate between models this many times")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--out", type=Path, required=True, help="JSON file to write")
+    args = parser.parse_args()
+
+    # Same precision settings as lerobot-eval
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.manual_seed(0)
+
+    models = {}
+    for name, path in map(parse_policy_arg, args.policy):
+        policy = load_policy(path, args.device)
+        batch = make_batch(policy)
+        models[name] = {"path": path, "policy": policy, "batch": batch, "timer": ChunkTimer(policy)}
+
+    results = {}
+    for name, m in models.items():
+        policy = m["policy"]
+        expert = policy.model.vlm_with_expert
+        results[name] = {
+            "path": m["path"],
+            "expert_vlm_layers": expert.expert_vlm_layers,
+            "expert_params": sum(p.numel() for p in expert.lm_expert.parameters()),
+            "total_params": sum(p.numel() for p in policy.parameters()),
+            "flops": count_flops(policy, m["batch"]),
+            "steps": {},
+        }
+
+    gpu_before = gpu_state()
+    per_round = max(1, args.iters // args.rounds)
+    for steps in args.steps:
+        samples = {name: [] for name in models}
+        for m in models.values():
+            m["policy"].config.num_steps = steps
+            for _ in range(args.warmup):
+                m["timer"](m["batch"])
+        for _ in range(args.rounds):
+            for name, m in models.items():
+                m["policy"].config.num_steps = steps
+                samples[name].extend(m["timer"](m["batch"]) for _ in range(per_round))
+        for name in models:
+            results[name]["steps"][steps] = {**summarize(samples[name]), "samples": samples[name]}
+    gpu_after = gpu_state()
+
+    # Cross-check of the split: fit wall_ms = prefix + K * per_step over the measured K
+    for r in results.values():
+        ks = sorted(r["steps"])
+        if len(ks) >= 2:
+            slope, intercept = statistics.linear_regression(ks, [r["steps"][k]["wall_ms"] for k in ks])
+            r["fit"] = {"prefix_ms": intercept, "per_step_ms": slope}
+
+    meta = {
+        "device": args.device,
+        "gpu_before": gpu_before,
+        "gpu_after": gpu_after,
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "platform": platform.platform(),
+        "git_commit": git_commit(),
+        "warmup": args.warmup,
+        "iters": per_round * args.rounds,
+        "rounds": args.rounds,
+        "batch_size": 1,
+        "empty_cameras": 1,
+        "tf32": True,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps({"meta": meta, "models": results}, indent=2))
+
+    print(f"\n{'model':<12}{'K':>4}{'total':>9}{'p90':>8}{'prefix':>9}{'denoise':>9}{'share':>7}")
+    for name, r in results.items():
+        for k, s in r["steps"].items():
+            print(
+                f"{name:<12}{k:>4}{s['wall_ms']:>9.1f}{s['wall_ms_p90']:>8.1f}"
+                f"{s['prefix_ms']:>9.1f}{s['denoise_ms']:>9.1f}{s['expert_share']:>7.0%}"
+            )
+        f = r["flops"]
+        fit = r.get("fit")
+        fit_text = f", fit: prefix {fit['prefix_ms']:.1f} ms + {fit['per_step_ms']:.1f} ms/step" if fit else ""
+        print(f"{name:<12}GFLOPs: prefix {f['prefix'] / 1e9:.1f}, per step {f['per_step'] / 1e9:.1f}{fit_text}")
+    print(f"\nSaved to {args.out}")
+
+
+if __name__ == "__main__":
+    main()
