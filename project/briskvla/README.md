@@ -13,13 +13,27 @@ revision used for the LIBERO teacher evaluation.
 |---|---|
 | `src/lerobot/policies/smolvla/configuration_smolvla.py` | Adds the `expert_vlm_layers` config field and its validation |
 | `src/lerobot/policies/smolvla/modeling_smolvla.py` | Passes `expert_vlm_layers` to the VLM + expert model |
-| `src/lerobot/policies/smolvla/smolvlm_with_expert.py` | Places expert layers at the chosen depths |
+| `src/lerobot/policies/smolvla/smolvlm_with_expert.py` | Places expert layers at the chosen depths, can record expert hidden states |
 | `project/briskvla/build_student.py` | Builds a student checkpoint from the teacher |
-| `project/briskvla/test_student.py` | Tests for the above |
+| `project/briskvla/distill_student.py` | Distills a student from the teacher on `lerobot/libero` |
+| `project/briskvla/run_ablation.py` | Layer ablation: distills and evaluates one student per layout |
+| `project/briskvla/test_student.py` | Tests for the student build |
+| `project/briskvla/test_distill.py` | Tests for the distillation losses |
 | `project/briskvla/latency.py` | Inference latency per action chunk, split into prefix and denoising |
 | `project/briskvla/run_eval.sh` | Latency and LIBERO success for one model, with fixed settings |
 | `project/briskvla/summarize_eval.py` | Success table for all evaluated models |
 | `project/briskvla/eval_colab.ipynb` | Runs `run_eval.sh` on Colab |
+
+## Setup
+
+```bash
+uv sync --locked --python 3.12 --extra smolvla --extra dataset   # distillation
+uv sync --locked --python 3.12 --extra smolvla --extra dataset --extra libero   # + simulator eval
+```
+
+Use Python 3.12. With 3.14, draccus fails to parse the policy config. Without a system ffmpeg,
+torchcodec cannot load and video decoding falls back to pyav, which works but is slower.
+`sudo apt install ffmpeg` fixes that.
 
 ## Expert layout
 
@@ -65,6 +79,9 @@ fails on the first forward pass.
 5. In `forward`, a denoising pass (prefix cached, only action tokens passed in) skips depths with no
    expert layer. Without this the joint-attention code has nothing to concatenate and crashes. The
    teacher never hits this case.
+6. `self.expert_hidden_states` (default `None`) can be set to a dict. `forward` then stores the
+   expert hidden state after each expert layer under its depth. The distillation script uses this
+   for the intermediate layer loss. With `None` nothing is recorded and behavior is unchanged.
 
 ## Building a student
 
@@ -121,11 +138,157 @@ latency, which matters most for "first 8". This is not implemented yet.
 
 The plan is to distill each candidate for the same short budget, compare action-chunk error against
 the teacher on held-out episodes, and train and evaluate only the best one on LIBERO.
+`run_ablation.py` (see [Layer ablation](#layer-ablation)) runs this comparison. The names `pairs`,
+`first8` and `last8` are defined in `LAYOUTS` in `distill_student.py`.
+
+## Distillation
+
+```bash
+uv run python project/briskvla/distill_student.py --layout pairs --out outputs/distill/pairs
+```
+
+The student is given by one of `--layout pairs|first8|last8`, `--layers 0,2,4,...` (built from the
+teacher in memory with `build_student.py`) or `--student <folder>` (a folder saved earlier). The
+teacher is the same pinned checkpoint as above and stays frozen.
+
+### Losses
+
+Each loss has its own weight. A loss with weight 0 is not computed.
+
+| Loss | Flag (default) | What it matches |
+|---|---|---|
+| Velocity distillation | `--w_velocity` (1.0) | Student velocity vs teacher velocity at the same `(x_t, t)` and prefix |
+| Intermediate layer alignment | `--w_hidden` (0.1) | Student expert hidden states vs teacher expert hidden states |
+| Output-level distillation | `--w_output` (1.0) | The action chunk the student samples vs the one the teacher samples from the same noise |
+| Ground truth flow matching | `--w_gt` (0.0) | SmolVLA's original loss against the dataset actions |
+
+- **Velocity.** `x_t` is built from the dataset action chunk with SmolVLA's own noise and time
+  sampling, so the student is trained on the same `(x_t, t)` distribution as the teacher was.
+- **Intermediate layers.** For each student expert layer, the hidden state of the 50 action tokens
+  after that layer is compared with a teacher layer's. Both are layer-normalized first (no learned
+  weights), so layers with larger activations don't dominate. `--hidden_map` picks the teacher layer:
+  - `same_depth` (default): the teacher layer at the same depth, which is the layer the student
+    layer was copied from.
+  - `uniform`: student layer `j` is matched to teacher depth `(j+1)*16/k - 1` (1, 3, ..., 15 for
+    k=8), so the last student layer is matched to the teacher's last layer.
+
+  With `same_depth` and `first8`, the student's last layer (depth 7) is pulled towards the teacher's
+  depth-7 state, while the output losses want it to produce what the teacher produces after depth
+  15. The two losses then pull in different directions. Try `uniform` or a smaller `--w_hidden` there.
+- **Output level.** The teacher integrates `num_steps` (10) Euler steps without gradients. The
+  student integrates `--student_num_steps` steps (default 10) with gradients through every step.
+  This is the most expensive loss. `--output_every N` computes it only every N steps.
+  `--student_num_steps 3` trains a student that is meant to be run with fewer steps
+  (evaluate it with `--policy.num_steps=3`).
+
+All action losses use only the 7 real action dimensions, in normalized action space. The ground
+truth loss also skips padded timesteps at the end of episodes.
+
+### How a training step works
+
+1. The batch goes through the teacher's preprocessor (rename cameras, tokenize the task, normalize
+   state and action), the same as in `lerobot-train`.
+2. The teacher's VLM encodes the prefix once without gradients and returns its KV cache. Teacher
+   and student have the same frozen VLM, and the prefix never attends to the action tokens, so the
+   student uses the same cache. The student also points at the teacher's VLM module, so the VLM is
+   kept in GPU memory only once.
+3. Teacher and student experts run `denoise_step` on that cache. The intermediate hidden states are
+   collected through `expert_hidden_states` (change 6 above).
+4. Only the student's expert, action projections and time MLP get gradients (`train_expert_only`,
+   `train_state_proj=False` from `build_student.py`).
+
+### Validation and outputs
+
+A random 5% of episodes (`--val_fraction`, seeded) is held out. Every `--eval_freq` steps (and at
+step 0, before training) the script computes these on `--val_batches` held-out batches with fixed
+noise:
+
+| Metric | Meaning |
+|---|---|
+| `chunk_mse_teacher` | Student vs teacher action chunk, both sampled with 10 steps from the same noise. Used to pick `best/` |
+| `chunk_mse_gt` | Student chunk vs dataset actions. `teacher_chunk_mse_gt` is the teacher's value for reference |
+| `velocity`, `hidden`, `gt_fm` | The training losses on held-out data |
+
+Output folder:
+
+| Path | Content |
+|---|---|
+| `best/`, `last/` | Student checkpoints in the teacher's layout. Pass to `lerobot-eval --policy.path=...` |
+| `metrics.jsonl` | One JSON line per train log, validation, and a `final` line with the median `sample_actions` latency (batch 1) of teacher and student |
+| `run_info.json` | Arguments, layers, hidden layer pairs, held-out episode indices, parameter counts |
+
+### Defaults and memory
+
+Optimizer defaults follow the teacher's `train_config.json` (AdamW, lr 1e-4, betas (0.9, 0.95),
+warmup then cosine decay to 2.5e-6, gradient clipping at 10). `--steps` defaults to 5000 and
+`--batch_size` to 8. Use `--grad_accum` for a larger effective batch. A smoke run with
+`--batch_size 4` and all losses used 3.2 GB of GPU memory at about 0.8 s per step on an RTX 5070
+Laptop GPU (8 GB). `--amp` turns on bf16 autocast, which uses less memory but is less exact.
+
+`--empty_cameras` (default 1) must match the `lerobot-eval` command. The teacher evaluation passes
+`--policy.empty_cameras=1`.
+
+### Dataset
+
+`lerobot/libero` (1693 episodes, 273k frames at 10 fps, about 1.9 GB) is downloaded on first use
+to `~/.cache/huggingface/lerobot/lerobot/libero`. To download it before training:
+
+```bash
+uv run hf download lerobot/libero --repo-type dataset
+```
+
+`--max_episodes N` uses a random subset of N episodes and downloads only their files, which is
+useful for a quick check:
+
+```bash
+uv run python project/briskvla/distill_student.py --layout pairs --out outputs/distill/debug \
+    --max_episodes 20 --steps 20 --eval_freq 10 --val_batches 2 --batch_size 4
+```
+
+## Layer ablation
+
+`run_ablation.py` distills one student per layout with the same arguments, optionally evaluates each
+one in LIBERO, and writes a summary table. Arguments after `--` go to `distill_student.py`
+unchanged, so every layout is trained with the same losses, steps and seed.
+
+```bash
+uv run python project/briskvla/run_ablation.py --out_root outputs/ablation/layers \
+    --eval_suites libero_spatial --eval_teacher -- --steps 5000 --batch_size 8
+```
+
+| Flag | Meaning |
+|---|---|
+| `--layouts` | Comma-separated layouts, default `pairs,first8,last8` |
+| `--eval_suites` | LIBERO suites for `lerobot-eval` on each `best/` (empty = skip, needs the `libero` extra) |
+| `--eval_episodes` | Episodes per task (default 10) |
+| `--eval_num_steps` | Denoising steps at eval (default: the checkpoint's 10) |
+| `--eval_n_action_steps` | Actions executed from each predicted chunk before replanning (default 10, see below) |
+| `--eval_teacher` | Also evaluate the teacher on the same suites, as a reference row |
+| `--summary_only` | Only rebuild the summary from finished runs |
+
+The `lerobot-eval` command is the same as the teacher evaluation in the top-level README, plus
+`--policy.n_action_steps=10`. The policy predicts a chunk of `chunk_size=50` actions per call, and
+`n_action_steps` is how many of them are executed before the policy is queried again with a new
+observation. The checkpoint default is 50 (the whole chunk, open loop). Replanning every 10 actions
+comes much closer to the paper's success rates. It only affects evaluation: training always uses the
+full 50-action chunk. Do not confuse it with `num_steps` (denoising steps per chunk) or with the
+number of expert layers. Use the same value for the teacher and every student so the rows can be
+compared. Results
+go to `<out_root>/<layout>/eval/<suite>/`. Restarting the same command skips layouts that finished
+distilling and suites that already have `eval_info.json`.
+
+`<out_root>/summary.md` and `summary.json` have one row per layout: layers, expert parameters,
+held-out `chunk_mse_teacher` before training and at the best step, `chunk_mse_gt`, the best
+velocity and hidden losses, latency of student and teacher, and success rate per suite.
+
+To compare loss terms instead of layouts, run the same command with different weights into
+different `--out_root` folders, for example `-- --w_hidden 0` or `-- --w_output 0`.
 
 ## Tests
 
 ```bash
 uv run --with pytest python -m pytest project/briskvla/test_student.py -sv
+uv run --with pytest python -m pytest project/briskvla/test_distill.py -sv
 ```
 
 pytest is not part of the default environment, hence `--with pytest`. The tests use the real
@@ -138,6 +301,14 @@ teacher with random inputs, so no dataset is needed. They take about a minute on
 | `test_k8_student_runs` | `sample_actions` returns shape (1, 50, 32) with finite values |
 | `test_only_expert_side_trains` | Only expert layers and action projections have `requires_grad` |
 | `test_save_and_reload` | The saved folder loads with `from_pretrained`, keeps `expert_vlm_layers`, has the processor files and gives the same actions |
+
+`test_distill.py` (about 3 minutes on an RTX 5070 Laptop GPU):
+
+| Test | Checks |
+|---|---|
+| `test_hidden_pairs` | `same_depth` and `uniform` give the expected student/teacher layer pairs |
+| `test_full_student_has_zero_distill_loss` | With all 16 layers, the velocity, hidden and output losses are 0 (the shared KV cache path matches the teacher exactly) |
+| `test_one_step_trains_only_the_student_expert` | For each layout, all losses are finite, every student expert layer gets a gradient, and the teacher gets no gradient and is unchanged after an optimizer step |
 
 ## Evaluation
 

@@ -124,6 +124,9 @@ class SmolVLMWithExpertModel(nn.Module):
         self.lm_expert = AutoModel.from_config(lm_expert_config)
 
         self.num_expert_layers = len(self.lm_expert.layers)
+        # Set to a dict to record the expert hidden state after each expert layer, keyed by depth.
+        # Used by the BriskVLA distillation script for intermediate layer alignment. None = off.
+        self.expert_hidden_states: dict[int, torch.Tensor] | None = None
         self.self_attn_every_n_layers = self_attn_every_n_layers
         if "cross" in attention_mode:
             # Reshape qkv projections to have the same input dimension as the vlm
@@ -506,6 +509,8 @@ class SmolVLMWithExpertModel(nn.Module):
                     out_emb += after_first_residual
 
                     outputs_embeds.append(out_emb)
+                    if i == 1 and self.expert_hidden_states is not None:
+                        self.expert_hidden_states[layer_idx] = out_emb
 
                     start = end if len(att_outputs) == 1 else 0
                 else:
