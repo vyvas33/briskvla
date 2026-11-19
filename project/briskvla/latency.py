@@ -16,6 +16,7 @@ Example:
 
 import argparse
 import json
+import os
 import platform
 import statistics
 import subprocess
@@ -156,6 +157,22 @@ def gpu_state() -> dict | None:
     return dict(zip(fields.split(","), (x.strip() for x in line.split(",")), strict=False))
 
 
+def cpu_name() -> str:
+    # Per-step time is limited by kernel launches from the CPU, so the CPU matters too
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    try:
+        result = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
+        if result.stdout.strip():
+            return result.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return platform.processor() or "unknown"
+
+
 def git_commit() -> str | None:
     result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
     return result.stdout.strip() or None
@@ -235,6 +252,8 @@ def main() -> None:
         "device": args.device,
         "gpu_before": gpu_before,
         "gpu_after": gpu_after,
+        "cpu": cpu_name(),
+        "cpu_count": os.cpu_count(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "platform": platform.platform(),
@@ -249,6 +268,8 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"meta": meta, "models": results}, indent=2))
 
+    gpu_name = (gpu_before or {}).get("name", args.device)
+    print(f"\nGPU: {gpu_name}, CPU: {meta['cpu']}")
     print(f"\n{'model':<12}{'K':>4}{'total':>9}{'p90':>8}{'prefix':>9}{'denoise':>9}{'share':>7}")
     for name, r in results.items():
         for k, s in r["steps"].items():
