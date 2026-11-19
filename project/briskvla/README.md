@@ -145,14 +145,19 @@ Every model is evaluated with `run_eval.sh`, so all numbers use the same setting
 parallel environments, seed 1000, 10 episodes per task, `empty_cameras=1`, and K = 10 and 3
 denoising steps. It needs Linux and an NVIDIA GPU.
 
+By default the script only measures latency, which is what the RTX 3080 runs:
+
 ```bash
 project/briskvla/run_eval.sh teacher teacher                          # the teacher
 project/briskvla/run_eval.sh k8_pairs_distilled path/to/checkpoint    # any other model
 ```
 
+`SUCCESS=1` adds the LIBERO success evals, and `LATENCY=0` skips latency. The Colab notebook sets
+both.
+
 The script first syncs packages and writes `~/.libero/config.yaml` if it is missing. Both steps are
 skipped when already done, or entirely with `SKIP_SETUP=1`. It then measures latency with
-`latency.py` and runs `lerobot-eval` on each suite. Results go to:
+`latency.py` and, with `SUCCESS=1`, runs `lerobot-eval` on each suite. Results go to:
 
 ```
 outputs/latency/<name>__<gpu>.json
@@ -165,10 +170,8 @@ Finished suites are skipped, so after a crash the same command continues where i
 are environment variables, listed at the top of the script. A quick check with one episode per task:
 
 ```bash
-STEPS=10 SUITES=libero_spatial EPISODES=1 LATENCY=0 project/briskvla/run_eval.sh smoke teacher
+SUCCESS=1 LATENCY=0 STEPS=10 SUITES=libero_spatial EPISODES=1 project/briskvla/run_eval.sh smoke teacher
 ```
-
-`LATENCY=0` skips the latency measurement and `SUCCESS=0` skips the LIBERO evals.
 
 We measure latency only on the RTX 3080 laptop and task success only on Colab, so that each metric
 comes from one machine type for every model. On Colab, open `eval_colab.ipynb`, set the model in the

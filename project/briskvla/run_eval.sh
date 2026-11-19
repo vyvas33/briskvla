@@ -15,13 +15,16 @@
 #   OUT=outputs           results go to $OUT/eval and $OUT/latency
 #   CKPT=outputs/checkpoints
 #   LATENCY=1             set to 0 to skip the latency measurement
-#   SUCCESS=1             set to 0 to skip the LIBERO success evals
+#   SUCCESS=0             set to 1 to run the LIBERO success evals (the Colab notebook does this)
 #   SKIP_SETUP=0          set to 1 to skip package sync and LIBERO setup
 #   MUJOCO_GL=egl         use osmesa if egl does not work (e.g. under WSL)
 #   PYTHON=               Python version for uv, e.g. 3.12 (empty keeps the current one)
 #
-# Example, quick check with one episode per task:
-#   STEPS=10 SUITES=libero_spatial EPISODES=1 LATENCY=0 project/briskvla/run_eval.sh smoke teacher
+# The defaults measure latency only, which is what the RTX 3080 runs:
+#   project/briskvla/run_eval.sh teacher teacher
+#
+# Example, quick success check with one episode per task:
+#   SUCCESS=1 LATENCY=0 STEPS=10 SUITES=libero_spatial EPISODES=1 project/briskvla/run_eval.sh smoke teacher
 #
 # Finished suites are skipped, so the script can simply be rerun after a crash.
 set -euo pipefail
@@ -38,7 +41,7 @@ SEED=${SEED:-1000}
 OUT=${OUT:-outputs}
 CKPT=${CKPT:-outputs/checkpoints}
 LATENCY=${LATENCY:-1}
-SUCCESS=${SUCCESS:-1}
+SUCCESS=${SUCCESS:-0}
 SKIP_SETUP=${SKIP_SETUP:-0}
 PYTHON=${PYTHON:-}
 
