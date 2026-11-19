@@ -12,9 +12,9 @@ Examples:
     # Only rebuild the summary from finished runs
     uv run python project/briskvla/run_ablation.py --out_root outputs/ablation/layers --summary_only
 
-A layout whose run folder already has best/ and a final metrics line is not trained again, and a
-suite that already has eval_info.json is not evaluated again, so an interrupted ablation can be
-restarted with the same command.
+A layout whose run folder already has best/ and a final metrics line is not trained again, a layout
+that was interrupted resumes from its last/ checkpoint, and a suite that already has eval_info.json
+is not evaluated again, so an interrupted ablation can be restarted with the same command.
 """
 
 import argparse
@@ -44,10 +44,8 @@ def distill(layout: str, run_dir: Path, extra: list[str]) -> None:
     if is_finished(run_dir):
         print(f"[skip] {layout}: already distilled in {run_dir}")
         return
-    if (run_dir / "metrics.jsonl").exists():
-        # A partial run would mix two runs' lines in metrics.jsonl
-        (run_dir / "metrics.jsonl").rename(run_dir / "metrics.partial.jsonl")
-    cmd = [sys.executable, str(HERE / "distill_student.py"), "--layout", layout, "--out", str(run_dir), *extra]
+    # A partial run resumes from its last/ checkpoint. distill_student.py handles its metrics.jsonl.
+    cmd =[sys.executable, str(HERE / "distill_student.py"), "--layout", layout, "--out", str(run_dir), *extra]
     print(" ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
 

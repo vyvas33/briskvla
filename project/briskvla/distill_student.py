@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import random
+import shutil
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -349,6 +350,104 @@ def measure_latency(policy: SmolVLAPolicy, batch: dict, iters: int = 20) -> floa
 
 
 # ----------------------------------------------------------------------------------------------
+# Checkpoints and resuming
+# ----------------------------------------------------------------------------------------------
+
+TRAINING_STATE = "training_state.pt"
+# Settings that must match for a run to be resumed. Everything else (logging, workers) may change.
+RESUME_KEYS = (
+    "steps", "batch_size", "grad_accum", "lr", "decay_lr", "warmup_steps", "weight_decay", "seed",
+    "w_velocity", "w_hidden", "w_output", "w_gt", "hidden_map", "output_every", "student_num_steps",
+    "val_fraction", "max_episodes", "amp", "empty_cameras",
+)  # fmt: skip
+
+
+def save_atomic(folder: Path, write) -> None:
+    """Write a checkpoint folder so that an interruption at any point leaves a complete copy.
+
+    `write(tmp)` fills `folder.tmp`. Then `folder` is moved to `folder.old`, `folder.tmp` to `folder`,
+    and `folder.old` is deleted. If the machine dies between the two moves, `folder.old` is still
+    complete and `find_resume_dir` falls back to it.
+    """
+    tmp, old = folder.with_name(folder.name + ".tmp"), folder.with_name(folder.name + ".old")
+    shutil.rmtree(tmp, ignore_errors=True)
+    write(tmp)
+    shutil.rmtree(old, ignore_errors=True)
+    if folder.exists():
+        folder.rename(old)
+    tmp.rename(folder)
+    shutil.rmtree(old, ignore_errors=True)
+
+
+def find_resume_dir(out: Path) -> Path | None:
+    """The newest complete `last` checkpoint with a training state, or None for a fresh run."""
+    for name in ("last", "last.old"):
+        if (out / name / TRAINING_STATE).exists() and (out / name / "model.safetensors").exists():
+            return out / name
+    return None
+
+
+def save_training_state(path: Path, step: int, best: float, optimizer, scheduler, args, layers) -> None:
+    torch.save(
+        {
+            "step": step,
+            "best": best,
+            "layers": list(layers),
+            "args": {k: getattr(args, k) for k in RESUME_KEYS},
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "rng_python": random.getstate(),
+            "rng_torch": torch.get_rng_state(),
+            "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+        },
+        path,
+    )
+
+
+def load_training_state(resume_dir: Path, student, optimizer, scheduler, args, layers) -> tuple[int, float]:
+    """Restore the student's trainable weights, optimizer, LR schedule and RNG from `resume_dir`.
+    Returns the step the checkpoint was saved at and the best validation chunk_mse_teacher so far."""
+    from safetensors.torch import load_file
+
+    state = torch.load(resume_dir / TRAINING_STATE, map_location="cpu", weights_only=False)
+    saved = state["args"]
+    mismatched = {k: (saved[k], getattr(args, k)) for k in RESUME_KEYS if saved.get(k) != getattr(args, k)}
+    if list(state["layers"]) != list(layers):
+        mismatched["layers"] = (state["layers"], list(layers))
+    if mismatched:
+        raise ValueError(
+            f"Cannot resume from {resume_dir}: settings differ (saved, now): {mismatched}. "
+            "Use the same arguments, or a new --out folder for a fresh run."
+        )
+
+    # The VLM is frozen and shared with the teacher, so only the student's own weights are loaded.
+    weights = load_file(resume_dir / "model.safetensors", device=str(student.config.device))
+    own = {k: v for k, v in weights.items() if ".vlm_with_expert.vlm." not in k}
+    missing, unexpected = student.load_state_dict(own, strict=False)
+    missing = [k for k in missing if ".vlm_with_expert.vlm." not in k]
+    if missing or unexpected:
+        raise ValueError(f"Checkpoint {resume_dir} does not match the student: {missing=} {unexpected=}")
+
+    optimizer.load_state_dict(state["optimizer"])
+    scheduler.load_state_dict(state["scheduler"])
+    random.setstate(state["rng_python"])
+    torch.set_rng_state(state["rng_torch"])
+    if state["rng_cuda"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["rng_cuda"])
+    return state["step"], state["best"]
+
+
+def truncate_metrics(path: Path, step: int) -> None:
+    """Drop log lines written after `step` (and the final line, which is written again at the end),
+    so a resumed run does not log anything twice."""
+    if not path.exists():
+        return
+    records = [(line, json.loads(line)) for line in path.read_text().splitlines() if line.strip()]
+    kept = [line for line, r in records if r["step"] <= step and r["split"] != "final"]
+    path.write_text("".join(line + "\n" for line in kept))
+
+
+# ----------------------------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------------------------
 
@@ -402,6 +501,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval_freq", type=int, default=500)
     p.add_argument("--val_batches", type=int, default=25)
     p.add_argument("--seed", type=int, default=1000)
+    p.add_argument("--no_resume", action="store_true", help="Fail instead of resuming if --out has a checkpoint")
     return p.parse_args()
 
 
@@ -435,7 +535,6 @@ def main() -> None:
     LeRobotDataset(args.dataset, root=args.dataset_root, episodes=None if args.max_episodes is None else train_eps + val_eps)
     train_ds = LeRobotDataset(args.dataset, root=args.dataset_root, episodes=train_eps, delta_timestamps=delta_timestamps)
     val_ds = LeRobotDataset(args.dataset, root=args.dataset_root, episodes=val_eps, delta_timestamps=delta_timestamps)
-    train_iter = cycle(make_loader(train_ds, args.batch_size, args.num_workers, True, args.seed))
     # Fixed order (no shuffle) so validation always sees the same frames
     val_loader = make_loader(val_ds, args.batch_size, min(args.num_workers, 2), False, args.seed)
 
@@ -444,6 +543,23 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda s: lr_lambda(s, args.lr, args.decay_lr, args.warmup_steps, args.steps)
     )
+
+    # Resume from the last checkpoint in --out if there is one (e.g. after the machine was reclaimed)
+    resume_dir = None if args.no_resume else find_resume_dir(args.out)
+    start_step, best = 0, float("inf")
+    if resume_dir is not None:
+        start_step, best = load_training_state(resume_dir, student, optimizer, scheduler, args, layers)
+        truncate_metrics(args.out / "metrics.jsonl", start_step)
+        print(f"Resuming from {resume_dir} at step {start_step} (best chunk_mse_teacher {best:.5g})")
+    elif any((args.out / name).exists() for name in ("best", "last", "last.old")):
+        # A fresh run would leave the old best/ in place if validation never improves on step 0
+        raise ValueError(f"{args.out} already has checkpoints. Remove them or use another --out folder.")
+    elif (args.out / "metrics.jsonl").exists():
+        # Lines from an earlier run without a checkpoint would be mixed with this run's
+        (args.out / "metrics.jsonl").rename(args.out / "metrics.partial.jsonl")
+    # The data order is not saved. Seeding with the start step gives a resumed run a new order
+    # instead of replaying the batches from the start of the first epoch.
+    train_iter = cycle(make_loader(train_ds, args.batch_size, args.num_workers, True, args.seed + start_step))
 
     run_info = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
@@ -455,6 +571,7 @@ def main() -> None:
         "expert_params_teacher": count_params(teacher.model.vlm_with_expert.lm_expert),
         "expert_params_student": count_params(student.model.vlm_with_expert.lm_expert),
         "trainable_params": sum(p.numel() for p in params),
+        "resumed_from_step": start_step,
     }
     (args.out / "run_info.json").write_text(json.dumps(run_info, indent=2))
     print(f"Layers {layers} | hidden pairs {pairs} | trainable {run_info['trainable_params'] / 1e6:.1f}M")
@@ -472,12 +589,28 @@ def main() -> None:
         log({"split": "val", "step": step, **metrics})
         return metrics
 
-    best = run_validation(0)["chunk_mse_teacher"]
+    def save_checkpoint(step: int, metrics: dict) -> None:
+        nonlocal best
+        # best/ first: if the run dies before last/ is written, it resumes from the previous last/
+        # and repeats these steps, so best/ is never behind the best value stored in last/
+        if metrics["chunk_mse_teacher"] < best:
+            best = metrics["chunk_mse_teacher"]
+            save_atomic(args.out / "best", lambda d: save_student(student, teacher_dir, d))
+            print(f"New best chunk_mse_teacher={best:.5g}, saved to {args.out / 'best'}")
+
+        def write_last(d: Path) -> None:
+            save_student(student, teacher_dir, d)
+            save_training_state(d / TRAINING_STATE, step, best, optimizer, scheduler, args, layers)
+
+        save_atomic(args.out / "last", write_last)
+
+    if start_step == 0:
+        best = run_validation(0)["chunk_mse_teacher"]
     autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and args.device.startswith("cuda"))
     running: dict[str, float] = {}
     start = time.perf_counter()
 
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         optimizer.zero_grad(set_to_none=True)
         with_output = step % args.output_every == 0
         for _ in range(args.grad_accum):
@@ -505,16 +638,11 @@ def main() -> None:
             running, start = {}, time.perf_counter()
 
         if step % args.eval_freq == 0 or step == args.steps:
-            metrics = run_validation(step)
-            save_student(student, teacher_dir, args.out / "last")
-            if metrics["chunk_mse_teacher"] < best:
-                best = metrics["chunk_mse_teacher"]
-                save_student(student, teacher_dir, args.out / "best")
-                print(f"New best chunk_mse_teacher={best:.5g}, saved to {args.out / 'best'}")
+            save_checkpoint(step, run_validation(step))
             start = time.perf_counter()
 
     if not (args.out / "best").exists():  # validation never improved on the copied weights
-        save_student(student, teacher_dir, args.out / "best")
+        save_atomic(args.out / "best", lambda d: save_student(student, teacher_dir, d))
 
     batch = preprocess(next(iter(val_loader)), preprocessor)
     student.eval()

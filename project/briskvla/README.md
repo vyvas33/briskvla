@@ -23,6 +23,7 @@ revision used for the LIBERO teacher evaluation.
 | `project/briskvla/run_eval.sh` | Latency and LIBERO success for one model, with fixed settings |
 | `project/briskvla/summarize_eval.py` | Success table for all evaluated models |
 | `project/briskvla/eval_colab.ipynb` | Runs `run_eval.sh` on Colab |
+| `project/briskvla/colab_distill.py` | Distills all layouts in parallel on a Colab VM, resuming interrupted ones (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_distill.py`) |
 
 ## Setup
 
@@ -213,9 +214,27 @@ Output folder:
 
 | Path | Content |
 |---|---|
-| `best/`, `last/` | Student checkpoints in the teacher's layout. Pass to `lerobot-eval --policy.path=...` |
+| `best/`, `last/` | Student checkpoints in the teacher's layout. Pass to `lerobot-eval --policy.path=...`. `last/` also has `training_state.pt` for resuming |
 | `metrics.jsonl` | One JSON line per train log, validation, and a `final` line with the median `sample_actions` latency (batch 1) of teacher and student |
 | `run_info.json` | Arguments, layers, hidden layer pairs, held-out episode indices, parameter counts |
+
+### Resuming
+
+A run that stops early (for example a Colab machine that is reclaimed) continues where it stopped
+when the same command is run again. At every validation (`--eval_freq`) `last/` gets a
+`training_state.pt` with the step, the best `chunk_mse_teacher`, the optimizer, the LR schedule and
+the random number generators. On start, if `--out` has one, the student's weights and this state are
+loaded and training continues from that step, so at most `--eval_freq` steps are repeated.
+
+- Checkpoints are written to `<name>.tmp/` and then moved into place, so stopping during a save
+  leaves the previous complete checkpoint. `best/` is written before `last/`.
+- The settings that affect training (steps, batch size, LR, loss weights, seed, ...) must be the
+  same as in the first run, otherwise the script stops with the list of differences.
+- The data order is not saved. A resumed run reshuffles with seed `--seed + step`, so the batches
+  after a resume differ from an uninterrupted run, but the result is otherwise equivalent.
+- `metrics.jsonl` lines after the resumed step are dropped and logged again.
+- A fresh run refuses an `--out` that already has `best/` or `last/` without a training state.
+  `--no_resume` makes the script fail instead of resuming.
 
 ### Defaults and memory
 
