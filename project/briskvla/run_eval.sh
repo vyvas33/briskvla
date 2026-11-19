@@ -12,6 +12,7 @@
 #   SUITES="libero_spatial libero_object libero_goal libero_10"
 #   EPISODES=10           episodes per task
 #   BATCH=5 ASYNC=true SEED=1000
+#   N_ACTION_STEPS=       actions executed before replanning (empty keeps the checkpoint's value, 50)
 #   OUT=outputs           results go to $OUT/eval and $OUT/latency
 #   CKPT=outputs/checkpoints
 #   LATENCY=1             set to 0 to skip the latency measurement
@@ -38,6 +39,7 @@ EPISODES=${EPISODES:-10}
 BATCH=${BATCH:-5}
 ASYNC=${ASYNC:-true}
 SEED=${SEED:-1000}
+N_ACTION_STEPS=${N_ACTION_STEPS:-}
 OUT=${OUT:-outputs}
 CKPT=${CKPT:-outputs/checkpoints}
 LATENCY=${LATENCY:-1}
@@ -130,6 +132,7 @@ for K in $STEPS; do
   "policy_dir": "$POLICY_DIR",
   "teacher_revision": "$TEACHER_REVISION",
   "num_steps": $K,
+  "n_action_steps": "${N_ACTION_STEPS:-checkpoint}",
   "suites": "$SUITES",
   "episodes_per_task": $EPISODES,
   "batch_size": $BATCH,
@@ -156,6 +159,7 @@ EOF
       --policy.path="$POLICY_DIR" \
       --policy.device=cuda \
       --policy.num_steps="$K" \
+      ${N_ACTION_STEPS:+--policy.n_action_steps="$N_ACTION_STEPS"} \
       --policy.empty_cameras=1 \
       --env.type=libero \
       --env.task="$SUITE" \
