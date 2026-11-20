@@ -98,6 +98,9 @@ class SmolVLAConfig(PreTrainedConfig):
     # Expert layer j runs next to VLM layer expert_vlm_layers[j] and reads its keys and values.
     # All VLM layers still run. None puts an expert layer at every depth, like the teacher.
     expert_vlm_layers: list[int] | None = None
+    # Hidden width of every expert FFN. None keeps the default derived from the expert hidden size.
+    # Set by BriskVLA students that fuse several teacher FFNs into one wider FFN.
+    expert_intermediate_size: int | None = None
     self_attn_every_n_layers: int = 2  # Interleave SA layers each self_attn_every_n_layers
     expert_width_multiplier: float = 0.75  # The action expert hidden size (wrt to the VLM)
 
@@ -139,6 +142,9 @@ class SmolVLAConfig(PreTrainedConfig):
                     f"`expert_vlm_layers` must be in [0, {self.num_vlm_layers}) "
                     f"(num_vlm_layers={self.num_vlm_layers}). Got {layers}."
                 )
+
+        if self.expert_intermediate_size is not None and self.expert_intermediate_size <= 0:
+            raise ValueError(f"`expert_intermediate_size` must be positive. Got {self.expert_intermediate_size}.")
 
     def validate_features(self) -> None:
         if self.input_features is None:

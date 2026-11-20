@@ -7,6 +7,12 @@ Denoising is the K expert passes. Settings match lerobot-eval: empty_cameras=1, 
 Models are measured in alternating rounds so that GPU temperature drift affects all of them equally.
 Any SmolVLA checkpoint works, including students from build_student.py.
 
+--breakdown also times every expert FFN (CUDA events around each `mlp` call), so denoising time is
+split into FFN and the rest (attention, norms, residuals, launch gaps). --compile runs the denoising
+step through torch.compile, the baseline any structural speedup has to beat. --ffn_width_sweep times
+one expert-sized SwiGLU alone at several hidden widths, which shows whether a wider (fused) FFN costs
+more than a narrow one at batch size 1.
+
 Example:
     uv run python project/briskvla/latency.py \
         --policy teacher=lerobot/smolvla_libero \
@@ -58,6 +64,33 @@ def make_batch(policy: SmolVLAPolicy, seed: int = 0) -> dict:
     return {k: v.to(cfg.device) for k, v in batch.items()}
 
 
+class FFNTimer:
+    """CUDA events around every expert FFN call. Adds two event records per layer and step."""
+
+    def __init__(self, policy: SmolVLAPolicy):
+        self.calls: list[tuple] = []
+        self._open: dict[int, torch.cuda.Event] = {}
+        for layer in policy.model.vlm_with_expert.lm_expert.layers:
+            layer.mlp.register_forward_pre_hook(self._pre)
+            layer.mlp.register_forward_hook(self._post)
+
+    def _pre(self, module, args):
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        self._open[id(module)] = event
+
+    def _post(self, module, args, output):
+        event = torch.cuda.Event(enable_timing=True)
+        event.record()
+        self.calls.append((self._open.pop(id(module)), event))
+
+    def reset(self) -> None:
+        self.calls = []
+
+    def total_ms(self) -> float:
+        return sum(start.elapsed_time(end) for start, end in self.calls)
+
+
 class ChunkTimer:
     """Times predict_action_chunk and the denoising steps inside it.
 
@@ -65,11 +98,14 @@ class ChunkTimer:
     synchronizes, which slows things down a little, so treat those numbers as a code check only.
     """
 
-    def __init__(self, policy: SmolVLAPolicy):
+    def __init__(self, policy: SmolVLAPolicy, breakdown: bool = False, compile: bool = False):
         self.policy = policy
         self.device = torch.device(policy.config.device)
         self.steps = []
+        self.ffn = FFNTimer(policy) if breakdown else None
         denoise_step = policy.model.denoise_step
+        if compile:
+            denoise_step = torch.compile(denoise_step)
 
         def timed_denoise_step(*args, **kwargs):
             start = self._mark()
@@ -102,6 +138,8 @@ class ChunkTimer:
     def __call__(self, batch: dict) -> dict:
         self.policy.reset()
         self.steps = []
+        if self.ffn is not None:
+            self.ffn.reset()
         self._sync()
         wall_start = time.perf_counter()
         start = self._mark()
@@ -114,12 +152,53 @@ class ChunkTimer:
         last_step = self.steps[-1][1]
         prefix_ms = self._ms(start, first_step)
         denoise_ms = self._ms(first_step, last_step)
-        return {
+        out = {
             "wall_ms": wall_ms,
             "prefix_ms": prefix_ms,
             "denoise_ms": denoise_ms,
             "other_ms": self._ms(start, end) - prefix_ms - denoise_ms,
         }
+        if self.ffn is not None:
+            # At inference the prefix pass has no action tokens, so the expert FFNs only run inside
+            # denoising steps and every recorded call belongs to one
+            out["ffn_ms"] = self.ffn.total_ms()
+            out["non_ffn_ms"] = denoise_ms - out["ffn_ms"]
+        return out
+
+
+@torch.no_grad()
+def ffn_width_sweep(policy: SmolVLAPolicy, widths: list[int], iters: int = 500) -> dict:
+    """Time one SwiGLU with the expert's hidden size on one chunk of action tokens at several
+    intermediate widths. Same dtype and TF32 settings as the policy."""
+    expert = policy.model.vlm_with_expert
+    hidden = expert.expert_hidden_size
+    tokens = policy.config.chunk_size
+    device = policy.config.device
+    dtype = expert.lm_expert.layers[0].mlp.gate_proj.weight.dtype
+    x = torch.randn(1, tokens, hidden, device=device, dtype=dtype)
+    out = {}
+    for width in widths:
+        gate = torch.nn.Linear(hidden, width, bias=False, device=device, dtype=dtype)
+        up = torch.nn.Linear(hidden, width, bias=False, device=device, dtype=dtype)
+        down = torch.nn.Linear(width, hidden, bias=False, device=device, dtype=dtype)
+
+        def ffn(x, gate=gate, up=up, down=down):
+            return down(torch.nn.functional.silu(gate(x)) * up(x))
+
+        for _ in range(50):
+            ffn(x)
+        torch.cuda.synchronize()
+        times = []
+        for _ in range(iters):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            ffn(x)
+            end.record()
+            torch.cuda.synchronize()
+            times.append(start.elapsed_time(end) * 1000)
+        out[width] = statistics.median(times)
+    return out
 
 
 def count_flops(policy: SmolVLAPolicy, batch: dict) -> dict:
@@ -199,7 +278,20 @@ def main() -> None:
     parser.add_argument("--rounds", type=int, default=5, help="Alternate between models this many times")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out", type=Path, required=True, help="JSON file to write")
+    parser.add_argument("--breakdown", action="store_true", help="Also time the expert FFNs (CUDA only)")
+    parser.add_argument("--compile", action="store_true", help="torch.compile the denoising step")
+    parser.add_argument(
+        "--ffn_width_sweep",
+        type=int,
+        nargs="*",
+        default=None,
+        help="Also time one expert SwiGLU at these intermediate widths (default 2048 3072 4096 8192)",
+    )
     args = parser.parse_args()
+    if args.breakdown and args.compile:
+        parser.error("--breakdown uses module hooks, which torch.compile traces through. Use one at a time.")
+    if (args.breakdown or args.ffn_width_sweep is not None) and not args.device.startswith("cuda"):
+        parser.error("--breakdown and --ffn_width_sweep need CUDA")
 
     # Same precision settings as lerobot-eval
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -210,7 +302,8 @@ def main() -> None:
     for name, path in map(parse_policy_arg, args.policy):
         policy = load_policy(path, args.device)
         batch = make_batch(policy)
-        models[name] = {"path": path, "policy": policy, "batch": batch, "timer": ChunkTimer(policy)}
+        timer = ChunkTimer(policy, breakdown=args.breakdown, compile=args.compile)
+        models[name] = {"path": path, "policy": policy, "batch": batch, "timer": timer}
 
     results = {}
     for name, m in models.items():
@@ -224,6 +317,11 @@ def main() -> None:
             "flops": count_flops(policy, m["batch"]),
             "steps": {},
         }
+
+    sweep = None
+    if args.ffn_width_sweep is not None:
+        widths = args.ffn_width_sweep or [2048, 3072, 4096, 8192]
+        sweep = ffn_width_sweep(next(iter(models.values()))["policy"], widths)
 
     gpu_before = gpu_state()
     per_round = max(1, args.iters // args.rounds)
@@ -264,9 +362,11 @@ def main() -> None:
         "batch_size": 1,
         "empty_cameras": 1,
         "tf32": True,
+        "compile": args.compile,
+        "breakdown": args.breakdown,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({"meta": meta, "models": results}, indent=2))
+    args.out.write_text(json.dumps({"meta": meta, "models": results, "ffn_width_sweep_us": sweep}, indent=2))
 
     gpu_name = (gpu_before or {}).get("name", args.device)
     print(f"\nGPU: {gpu_name}, CPU: {meta['cpu']}")
@@ -277,10 +377,17 @@ def main() -> None:
                 f"{name:<12}{k:>4}{s['wall_ms']:>9.1f}{s['wall_ms_p90']:>8.1f}"
                 f"{s['prefix_ms']:>9.1f}{s['denoise_ms']:>9.1f}{s['expert_share']:>7.0%}"
             )
+        if args.breakdown:
+            for k, s in r["steps"].items():
+                ffn = s["ffn_ms"] / k
+                rest = s["non_ffn_ms"] / k
+                print(f"{name:<12}{k:>4}  per step: FFN {ffn:.2f} ms ({ffn / (ffn + rest):.0%}), rest {rest:.2f} ms")
         f = r["flops"]
         fit = r.get("fit")
         fit_text = f", fit: prefix {fit['prefix_ms']:.1f} ms + {fit['per_step_ms']:.1f} ms/step" if fit else ""
         print(f"{name:<12}GFLOPs: prefix {f['prefix'] / 1e9:.1f}, per step {f['per_step'] / 1e9:.1f}{fit_text}")
+    if sweep:
+        print("\nOne SwiGLU on one chunk (us):  " + "  ".join(f"{w}: {t:.0f}" for w, t in sweep.items()))
     print(f"\nSaved to {args.out}")
 
 
