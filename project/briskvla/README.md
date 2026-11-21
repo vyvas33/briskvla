@@ -24,6 +24,7 @@ revision used for the LIBERO teacher evaluation.
 | `project/briskvla/summarize_eval.py` | Success table for all evaluated models |
 | `project/briskvla/eval_colab.ipynb` | Runs `run_eval.sh` on Colab |
 | `project/briskvla/colab_distill.py` | Distills all layouts in parallel on a Colab VM, resuming interrupted ones (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_distill.py`) |
+| `project/briskvla/colab_eval.py` | Runs a queue of `run_eval.sh` success evals on a Colab VM, two at a time, skipping finished suites (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_eval.py`) |
 
 ## Setup
 
