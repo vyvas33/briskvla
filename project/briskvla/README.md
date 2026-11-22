@@ -386,3 +386,86 @@ uv run python project/briskvla/latency.py \
     --policy k8_pairs=outputs/students/k8_pairs \
     --out outputs/latency/rtx3080.json
 ```
+
+## Results
+
+Every student has 8 expert layers. Each was trained for 5000 steps at batch size 8 from the teacher's
+copied layers, then evaluated with `run_eval.sh` (seed 1000, 10 episodes per task, 100 episodes per
+suite, `n_action_steps=10`). Entries are success rates in %.
+
+| Student | Loss weights (`velocity / hidden / output / gt`) |
+|---|---|
+| Distilled | 1 / 0.1 / 1 / 0 (defaults) |
+| Shallow | 0 / 0 / 0 / 1 (ground truth flow matching only, no teacher) |
+| Shallow-π | 1 / 0.1 / 0 / 1 (teacher velocity and hidden states plus ground truth, no output loss) |
+
+Layouts: Spread = `pairs`, Early = `first8`, Late = `last8` (see [Candidate layouts](#candidate-layouts)).
+
+### Success rate by denoising steps K
+
+K is `--policy.num_steps` at eval. All students were trained with 10 steps.
+
+**K = 10**
+
+| Model | Spatial | Object | Goal | Long | Avg |
+|---|---|---|---|---|---|
+| Spread, distilled | 78 | 79 | 79 | 75 | 77.8 |
+| Early, distilled | 79 | 87 | 83 | 64 | 78.2 |
+| Late, distilled | 67 | 82 | 78 | 56 | 70.8 |
+| Spread, shallow | 62 | 79 | 78 | 69 | 72.0 |
+| Early, shallow | 75 | 87 | 74 | 67 | 75.8 |
+| Late, shallow | 63 | 66 | 75 | 48 | 63.0 |
+
+**K = 3**
+
+| Model | Spatial | Object | Goal | Long | Avg |
+|---|---|---|---|---|---|
+| Spread, distilled | 55 | 64 | 71 | 49 | 59.8 |
+| Early, distilled | 68 | 42 | 52 | 52 | 53.5 |
+| Late, distilled | 53 | 66 | 69 | 45 | 58.3 |
+| Spread, shallow | 66 | 84 | 77 | 71 | 74.5 |
+| Early, shallow | 85 | 79 | 78 | 74 | 79.0 |
+| Late, shallow | 56 | 71 | 77 | 47 | 62.8 |
+
+**K = 1**
+
+| Model | Spatial | Object | Goal | Long | Avg |
+|---|---|---|---|---|---|
+| Spread, distilled | 70 | 74 | 78 | 57 | 69.8 |
+| Early, distilled | 88 | 73 | 73 | 59 | 73.2 |
+| Late, distilled | 59 | 74 | 69 | 46 | 62.0 |
+| Spread, shallow | 66 | 81 | 74 | 66 | 71.8 |
+| Early, shallow | 78 | 81 | 81 | 66 | 76.5 |
+| Late, shallow | 57 | 67 | 60 | 52 | 59.0 |
+
+With 100 episodes per cell, the 95% interval is roughly ±9 points around 50–80%, so differences
+smaller than about 10 points in a single cell are not significant.
+
+### Shallow-π (libero_spatial only)
+
+| Layout | K = 10 | K = 3 | K = 1 |
+|---|---|---|---|
+| Spread | 63 | 72 | 64 |
+| Early | 67 | 74 | 79 |
+| Late | 55 | 56 | 60 |
+
+### Untrained students
+
+The 8 copied teacher layers without any training reach 3 (Spread), 0 (Early) and 0 (Late) on
+libero_spatial at K = 10.
+
+### Observations
+
+- At K = 10 the distilled students are the best on average (Early 78.2, Spread 77.8).
+- At K = 3 the distilled students drop by 12–25 points, while the shallow students stay at about
+  their K = 10 level or above. Early, shallow at K = 3 (79.0) is the best average in the table.
+- Shallow-π, which keeps the teacher's velocity and hidden losses but drops the output loss, does
+  not collapse at K = 3. This points to the output-level loss (trained with 10 integration steps) as
+  the likely cause of both the distilled students' K = 10 advantage and their K = 3 drop.
+- Late is the weakest layout at K = 10 and K = 1 for both distilled and shallow, and for Shallow-π.
+
+### Where the numbers ran
+
+Most success evals ran on Colab with batch size 5. The Late (`last8`) libero_10 runs went out of
+memory there and were rerun on an RTX laptop GPU with batch size 2, and the Shallow-π runs also
+ran on that laptop. Each run's settings, including batch size, are in its `run_metadata.json`.
