@@ -232,6 +232,12 @@ pi = ["lerobot[transformers-dep]", "lerobot[scipy-dep]", "lerobot[sentencepiece-
 dm05 = ["lerobot[transformers-dep]"]
 molmoact2 = ["lerobot[transformers-dep]", "lerobot[peft-dep]", "lerobot[scipy-dep]"]
 smolvla = ["lerobot[transformers-dep]", "num2words>=0.5.14,<0.6.0", "lerobot[accelerate-dep]"]
+briskvla = [
+    "lerobot[smolvla]",
+    "lerobot[dataset]",
+    "wandb>=0.19.0,<1.0.0",
+    "matplotlib>=3.9.0,<4.0.0",
+]
 multi_task_dit = ["lerobot[transformers-dep]", "lerobot[diffusers-dep]"]
 groot = [
     "lerobot[transformers-dep]",
@@ -482,6 +488,7 @@ ignore = [
 "examples/**" = ["D"]
 "benchmarks/**" = ["D"]
 "scripts/**" = ["D"]
+"project/**" = ["D"]
 "setup.py" = ["D"]
 "src/lerobot/templates/**" = ["D"]
 # Vendored from transformers; keeps its upstream docstring style so syncs stay clean.

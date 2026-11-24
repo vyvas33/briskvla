@@ -166,6 +166,9 @@ sbatch*.sh
 data/
 outputs/
 
+# BriskVLA generated report figures
+project/briskvla/figures/
+
 # Translations
 *.mo
 *.pot
