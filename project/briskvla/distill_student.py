@@ -1,7 +1,11 @@
-"""Distill a BriskVLA student from the SmolVLA teacher on lerobot/libero.
+"""Train or distill a reduced-depth BriskVLA model from the SmolVLA teacher on lerobot/libero.
 
-The student is built from the teacher with build_student.py (in memory, or loaded from a folder) and
-trained with up to four losses, each with its own weight:
+Naming convention:
+    student  any reduced-depth model trained with teacher supervision (velocity/hidden/output)
+    shallow  any reduced-depth model trained only on ground-truth actions (or untrained)
+
+The model is built from the teacher with build_student.py (in memory, or loaded from a folder)
+and trained with up to four losses, each with its own weight:
 
     velocity  MSE between student and teacher velocities at the same (x_t, t) and prefix
     hidden    MSE between student and teacher expert hidden states (intermediate layer alignment)
@@ -12,8 +16,9 @@ The VLM is frozen and identical in both models, so the prefix (images, instructi
 encoded once per batch by the teacher and its KV cache is shared by the teacher and student experts.
 
 Examples:
-    uv run python project/briskvla/distill_student.py --layout pairs --out outputs/distill/pairs
-    uv run python project/briskvla/distill_student.py --layers 0,2,4,6 --steps 200 --out outputs/distill/dbg
+    uv run python project/briskvla/distill_student.py --layout spread --out outputs/distill/student_8L_spread
+    uv run python project/briskvla/distill_student.py --layout early \
+        --w_velocity 0 --w_hidden 0 --w_output 0 --w_gt 1 --out outputs/distill/shallow_8L_early
 """
 
 import argparse
@@ -27,15 +32,29 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from build_student import (
-    TEACHER,
-    TEACHER_REVISION,
     build_student,
     count_params,
     download_teacher,
     save_student,
 )
+from common import (
+    ALL_LAYOUT_CHOICES,
+    DATASET,
+    DEFAULT_EMPTY_CAMERAS,
+    DEFAULT_SEED,
+    LAYOUTS as LAYOUTS,
+    RENAME_MAP,
+    TEACHER,
+    TEACHER_REVISION,
+    canonical_layout_name,
+    git_info,
+    gpu_name,
+    infer_model_role,
+    resolve_layout,
+)
+from wandb_log import WandbDistillLogger, add_wandb_args, ensure_wandb_auth, resolve_wandb_settings
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, resolve_delta_timestamps
@@ -45,21 +64,6 @@ from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, make_att_2d
 from lerobot.processor.rename_processor import rename_batch_keys
 from lerobot.utils.collate import lerobot_collate_fn
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
-
-# Expert layouts compared in the layer ablation. All have 4 joint- and 4 cross-attention layers.
-LAYOUTS = {
-    "pairs": [0, 1, 4, 5, 8, 9, 12, 13],
-    "first8": [0, 1, 2, 3, 4, 5, 6, 7],
-    "last8": [8, 9, 10, 11, 12, 13, 14, 15],
-}
-
-DATASET = "lerobot/libero"
-# Same mapping as the teacher's train_config.json and policy_preprocessor.json
-RENAME_MAP = {
-    "observation.images.image": "observation.images.camera1",
-    "observation.images.image2": "observation.images.camera2",
-}
-
 
 # ----------------------------------------------------------------------------------------------
 # Models
@@ -227,7 +231,7 @@ def compute_losses(
     with_output: bool = True,
 ) -> dict[str, torch.Tensor]:
     """All distillation losses for one preprocessed batch. Losses with weight 0 are skipped."""
-    T, S = teacher.model, student.model
+    t_model, s_model = teacher.model, student.model
     images, img_masks = teacher.prepare_images(batch)
     state = teacher.prepare_state(batch)
     actions = teacher.prepare_action(batch)
@@ -235,22 +239,22 @@ def compute_losses(
     is_pad = batch.get("action_is_pad")
     n_dims = teacher.config.action_feature.shape[0]
 
-    prefix_pad, kv = encode_prefix(T, images, img_masks, lang_tokens, lang_masks, state)
+    prefix_pad, kv = encode_prefix(t_model, images, img_masks, lang_tokens, lang_masks, state)
 
     def student_velocity(x_t, t):
-        v = S.denoise_step(prefix_pad, kv, x_t, t)
+        v = s_model.denoise_step(prefix_pad, kv, x_t, t)
         detach_cache(kv)
         return v
 
     def teacher_velocity(x_t, t):
-        return T.denoise_step(prefix_pad, kv, x_t, t)
+        return t_model.denoise_step(prefix_pad, kv, x_t, t)
 
     losses: dict[str, torch.Tensor] = {}
 
     # Velocity, hidden and gt losses share one (x_t, t) built from the dataset actions
     if weights["velocity"] > 0 or weights["hidden"] > 0 or weights["gt"] > 0:
-        noise = T.sample_noise(actions.shape, actions.device)
-        t = T.sample_time(actions.shape[0], actions.device)
+        noise = t_model.sample_noise(actions.shape, actions.device)
+        t = t_model.sample_time(actions.shape[0], actions.device)
         x_t, u_t, _ = make_flow_matching_inputs(actions, noise, t, convention=FlowConvention.NOISE_AT_ONE)
         use_hidden = weights["hidden"] > 0
         with torch.no_grad(), record_hidden(teacher, use_hidden) as teacher_hidden:
@@ -267,7 +271,7 @@ def compute_losses(
     # Output level: both models integrate from the same noise; gradients flow through every
     # student denoising step
     if weights["output"] > 0 and with_output:
-        noise = T.sample_noise(actions.shape, actions.device)
+        noise = t_model.sample_noise(actions.shape, actions.device)
         with torch.no_grad():
             chunk_teacher = euler_integrate(teacher_velocity, noise, teacher.config.num_steps)
         chunk_student = euler_integrate(student_velocity, noise, student_num_steps)
@@ -291,7 +295,7 @@ def validate(teacher, student, val_loader, preprocessor, pairs, max_batches: int
     velocity / hidden / gt_fm  the training losses on held-out data
     """
     student.eval()
-    T, S = teacher.model, student.model
+    t_model, s_model = teacher.model, student.model
     n_dims = teacher.config.action_feature.shape[0]
     sums: dict[str, float] = {}
     n = 0
@@ -309,9 +313,9 @@ def validate(teacher, student, val_loader, preprocessor, pairs, max_batches: int
             state = teacher.prepare_state(batch)
             actions = teacher.prepare_action(batch)
             lang = (batch[OBS_LANGUAGE_TOKENS], batch[OBS_LANGUAGE_ATTENTION_MASK])
-            noise = T.sample_noise(actions.shape, actions.device)
-            chunk_teacher = T.sample_actions(images, img_masks, *lang, state, noise=noise)
-            chunk_student = S.sample_actions(images, img_masks, *lang, state, noise=noise)
+            noise = t_model.sample_noise(actions.shape, actions.device)
+            chunk_teacher = t_model.sample_actions(images, img_masks, *lang, state, noise=noise)
+            chunk_student = s_model.sample_actions(images, img_masks, *lang, state, noise=noise)
             is_pad = batch.get("action_is_pad")
             metrics = {
                 "velocity": losses["velocity"].item(),
@@ -464,9 +468,11 @@ def lr_lambda(step: int, peak_lr: float, decay_lr: float, warmup: int, total: in
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     which = p.add_mutually_exclusive_group(required=True)
-    which.add_argument("--layout", choices=sorted(LAYOUTS), help="Named expert layout")
+    which.add_argument(
+        "--layout", choices=ALL_LAYOUT_CHOICES, help="Named expert layout (canonical or alias)"
+    )
     which.add_argument("--layers", help="Comma-separated depths to keep an expert layer at")
-    which.add_argument("--student", type=Path, help="Start from a student folder saved earlier")
+    which.add_argument("--student", type=Path, help="Start from a saved checkpoint folder")
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--teacher", default=TEACHER)
     p.add_argument("--revision", default=TEACHER_REVISION)
@@ -481,8 +487,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w_gt", type=float, default=0.0)
     p.add_argument("--hidden_map", choices=["same_depth", "uniform"], default="same_depth")
     p.add_argument("--output_every", type=int, default=1, help="Compute the output loss every N steps")
-    p.add_argument("--student_num_steps", type=int, default=None, help="Student denoising steps in the "
-                   "output loss (default: the teacher's num_steps)")
+    p.add_argument(
+        "--student_num_steps",
+        type=int,
+        default=None,
+        help="Student denoising steps in the output loss (default: the teacher's num_steps)",
+    )
     # Optimization (defaults follow the teacher's train_config.json)
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch_size", type=int, default=8)
@@ -492,34 +502,49 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--warmup_steps", type=int, default=500)
     p.add_argument("--grad_clip", type=float, default=10.0)
     p.add_argument("--weight_decay", type=float, default=1e-10)
-    p.add_argument("--amp", action="store_true", help="bf16 autocast on CUDA (lower memory, slightly less exact)")
+    p.add_argument(
+        "--amp", action="store_true", help="bf16 autocast on CUDA (lower memory, slightly less exact)"
+    )
     # Bookkeeping
-    p.add_argument("--empty_cameras", type=int, default=1, help="Must match the lerobot-eval command")
+    p.add_argument("--empty_cameras", type=int, default=DEFAULT_EMPTY_CAMERAS, help="Must match lerobot-eval")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--log_freq", type=int, default=50)
     p.add_argument("--eval_freq", type=int, default=500)
     p.add_argument("--val_batches", type=int, default=25)
-    p.add_argument("--seed", type=int, default=1000)
-    p.add_argument("--no_resume", action="store_true", help="Fail instead of resuming if --out has a checkpoint")
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p.add_argument(
+        "--no_resume", action="store_true", help="Fail instead of resuming if --out has a checkpoint"
+    )
+    add_wandb_args(p)
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    wb = resolve_wandb_settings(args)
+    ensure_wandb_auth(wb["mode"])
+
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
 
     teacher_dir = download_teacher(args.teacher, args.revision)
     teacher = load_teacher(teacher_dir, args.device, args.empty_cameras)
-    layers = LAYOUTS[args.layout] if args.layout else [int(x) for x in args.layers.split(",")] if args.layers else None
+    layers = (
+        resolve_layout(args.layout)
+        if args.layout
+        else [int(x) for x in args.layers.split(",")]
+        if args.layers
+        else None
+    )
     student = load_student(teacher, layers, args.student)
     layers = student.model.vlm_with_expert.expert_vlm_layers
     student.train()
     pairs = hidden_pairs(layers, args.hidden_map, teacher.config.num_vlm_layers)
     weights = {"velocity": args.w_velocity, "hidden": args.w_hidden, "output": args.w_output, "gt": args.w_gt}
     student_num_steps = args.student_num_steps or teacher.config.num_steps
+    role = infer_model_role(args.w_velocity, args.w_hidden, args.w_output, args.steps)
 
     preprocessor, _ = make_pre_post_processors(
         teacher.config,
@@ -532,14 +557,24 @@ def main() -> None:
     delta_timestamps = resolve_delta_timestamps(teacher.config, meta, RENAME_MAP)
     # Download the files of both splits first. A split built from a partial cache does not fetch the
     # files it is missing, it fails with "corresponds to no data".
-    LeRobotDataset(args.dataset, root=args.dataset_root, episodes=None if args.max_episodes is None else train_eps + val_eps)
-    train_ds = LeRobotDataset(args.dataset, root=args.dataset_root, episodes=train_eps, delta_timestamps=delta_timestamps)
-    val_ds = LeRobotDataset(args.dataset, root=args.dataset_root, episodes=val_eps, delta_timestamps=delta_timestamps)
+    LeRobotDataset(
+        args.dataset,
+        root=args.dataset_root,
+        episodes=None if args.max_episodes is None else train_eps + val_eps,
+    )
+    train_ds = LeRobotDataset(
+        args.dataset, root=args.dataset_root, episodes=train_eps, delta_timestamps=delta_timestamps
+    )
+    val_ds = LeRobotDataset(
+        args.dataset, root=args.dataset_root, episodes=val_eps, delta_timestamps=delta_timestamps
+    )
     # Fixed order (no shuffle) so validation always sees the same frames
     val_loader = make_loader(val_ds, args.batch_size, min(args.num_workers, 2), False, args.seed)
 
     params = trainable_parameters(student)
-    optimizer = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(
+        params, lr=args.lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=args.weight_decay
+    )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lambda s: lr_lambda(s, args.lr, args.decay_lr, args.warmup_steps, args.steps)
     )
@@ -563,8 +598,13 @@ def main() -> None:
 
     run_info = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+        "role": role,
+        "layout_canonical": canonical_layout_name(args.layout) if args.layout else None,
         "layers": layers,
         "hidden_pairs": pairs,
+        "expert_intermediate_size": student.config.expert_intermediate_size,
+        "num_expert_layers": len(layers),
+        "student_num_steps": student_num_steps,
         "teacher_dir": str(teacher_dir),
         "train_episodes": len(train_eps),
         "val_episodes": val_eps,
@@ -572,16 +612,32 @@ def main() -> None:
         "expert_params_student": count_params(student.model.vlm_with_expert.lm_expert),
         "trainable_params": sum(p.numel() for p in params),
         "resumed_from_step": start_step,
+        "gpu": gpu_name(),
+        "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **git_info(),
     }
     (args.out / "run_info.json").write_text(json.dumps(run_info, indent=2))
-    print(f"Layers {layers} | hidden pairs {pairs} | trainable {run_info['trainable_params'] / 1e6:.1f}M")
+    print(
+        f"Role {role} | Layers {layers} | hidden pairs {pairs} | trainable {run_info['trainable_params'] / 1e6:.1f}M"
+    )
     print(f"Episodes: {len(train_eps)} train, {len(val_eps)} val | weights {weights}")
 
     metrics_file = (args.out / "metrics.jsonl").open("a")
+    wandb_logger = WandbDistillLogger(
+        args.out,
+        project=wb["project"],
+        config={k: v for k, v in run_info.items() if k != "val_episodes"},
+        entity=wb["entity"],
+        group=wb["group"],
+        name=wb["name"],
+        tags=wb["tags"],
+        mode=wb["mode"],
+    )
 
     def log(record: dict) -> None:
         metrics_file.write(json.dumps(record) + "\n")
         metrics_file.flush()
+        wandb_logger.log(record)
         print(" ".join(f"{k}={v:.5g}" if isinstance(v, float) else f"{k}={v}" for k, v in record.items()))
 
     def run_validation(step: int) -> dict:
@@ -606,7 +662,9 @@ def main() -> None:
 
     if start_step == 0:
         best = run_validation(0)["chunk_mse_teacher"]
-    autocast = torch.autocast("cuda", dtype=torch.bfloat16, enabled=args.amp and args.device.startswith("cuda"))
+    autocast = torch.autocast(
+        "cuda", dtype=torch.bfloat16, enabled=args.amp and args.device.startswith("cuda")
+    )
     running: dict[str, float] = {}
     start = time.perf_counter()
 
@@ -616,7 +674,9 @@ def main() -> None:
         for _ in range(args.grad_accum):
             batch = preprocess(next(train_iter), preprocessor)
             with autocast:
-                losses = compute_losses(teacher, student, batch, weights, pairs, student_num_steps, with_output)
+                losses = compute_losses(
+                    teacher, student, batch, weights, pairs, student_num_steps, with_output
+                )
             (losses["total"] / args.grad_accum).backward()
             for k, v in losses.items():
                 running[k] = running.get(k, 0.0) + v.item() / args.grad_accum
@@ -626,15 +686,19 @@ def main() -> None:
 
         if step % args.log_freq == 0:
             elapsed = time.perf_counter() - start
-            log({
-                "split": "train",
-                "step": step,
-                **{k: v / args.log_freq for k, v in running.items()},
-                "grad_norm": grad_norm.item(),
-                "lr": scheduler.get_last_lr()[0],
-                "s_per_step": elapsed / args.log_freq,
-                "gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0,
-            })
+            log(
+                {
+                    "split": "train",
+                    "step": step,
+                    **{k: v / args.log_freq for k, v in running.items()},
+                    "grad_norm": grad_norm.item(),
+                    "lr": scheduler.get_last_lr()[0],
+                    "s_per_step": elapsed / args.log_freq,
+                    "gpu_mem_gb": torch.cuda.max_memory_allocated() / 1e9
+                    if torch.cuda.is_available()
+                    else 0.0,
+                }
+            )
             running, start = {}, time.perf_counter()
 
         if step % args.eval_freq == 0 or step == args.steps:
@@ -652,6 +716,7 @@ def main() -> None:
     }
     log({"split": "final", "step": args.steps, "best_chunk_mse_teacher": best, **latency})
     metrics_file.close()
+    wandb_logger.finish()
 
 
 if __name__ == "__main__":

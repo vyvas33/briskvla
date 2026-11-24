@@ -28,7 +28,7 @@ def teacher(teacher_dir):
 
 
 @pytest.fixture(scope="module")
-def k8_fuse(teacher):
+def shallow_ffn_fused(teacher):
     return compress(teacher, group=2, keep="alternate", ffn="fuse")
 
 
@@ -84,10 +84,10 @@ def test_fused_ffn_equals_parallel_ffns(teacher):
 
 
 @torch.no_grad()
-def test_compressed_layer_runs_the_fused_ffn(teacher, k8_fuse):
+def test_compressed_layer_runs_the_fused_ffn(teacher, shallow_ffn_fused):
     """The built student's layer applies the fused FFN through its own modules (bf16 weights)."""
     t_layers = teacher.model.vlm_with_expert.lm_expert.layers
-    s_layer = k8_fuse.model.vlm_with_expert.lm_expert.layers[1]  # pair (2, 3)
+    s_layer = shallow_ffn_fused.model.vlm_with_expert.lm_expert.layers[1]  # pair (2, 3)
     dtype = s_layer.mlp.gate_proj.weight.dtype
     x = torch.randn(1, 50, s_layer.mlp.gate_proj.weight.shape[1], device=teacher.config.device, dtype=dtype)
     expected = sum(t_layers[i].mlp(t_layers[i].post_attention_layernorm(x)).float() for i in (2, 3))
@@ -96,12 +96,12 @@ def test_compressed_layer_runs_the_fused_ffn(teacher, k8_fuse):
     torch.testing.assert_close(actual, expected, rtol=0.05, atol=0.05)
 
 
-def test_layout_and_size(teacher, k8_fuse):
-    assert k8_fuse.config.expert_vlm_layers == ALTERNATE_PAIRS
-    assert k8_fuse.config.expert_intermediate_size == 4096
-    assert expert_params(k8_fuse) == pytest.approx(84.5e6, rel=0.01)
-    k8_drop = compress(teacher, group=2, keep="alternate", ffn="drop")
-    assert expert_params(k8_drop) == pytest.approx(49.1e6, rel=0.01)
+def test_layout_and_size(teacher, shallow_ffn_fused):
+    assert shallow_ffn_fused.config.expert_vlm_layers == ALTERNATE_PAIRS
+    assert shallow_ffn_fused.config.expert_intermediate_size == 4096
+    assert expert_params(shallow_ffn_fused) == pytest.approx(84.5e6, rel=0.01)
+    shallow_dropped = compress(teacher, group=2, keep="alternate", ffn="drop")
+    assert expert_params(shallow_dropped) == pytest.approx(49.1e6, rel=0.01)
 
 
 @torch.no_grad()
@@ -125,9 +125,9 @@ def test_group_one_matches_teacher(teacher):
 
 
 @torch.no_grad()
-def test_compress_twice(teacher, k8_fuse):
+def test_compress_twice(teacher, shallow_ffn_fused):
     """16 -> 8 -> 4: merging an already merged student."""
-    k4 = compress(k8_fuse, group=2, keep="alternate", ffn="fuse")
+    k4 = compress(shallow_ffn_fused, group=2, keep="alternate", ffn="fuse")
     assert k4.config.expert_vlm_layers == [0, 7, 8, 15]
     assert k4.config.expert_intermediate_size == 8192
     actions = k4.model.sample_actions(**random_inputs(teacher))
@@ -136,10 +136,12 @@ def test_compress_twice(teacher, k8_fuse):
 
 
 @torch.no_grad()
-def test_save_and_reload(teacher, teacher_dir, k8_fuse, tmp_path):
-    save_student(k8_fuse, teacher_dir, tmp_path)
+def test_save_and_reload(teacher, teacher_dir, shallow_ffn_fused, tmp_path):
+    save_student(shallow_ffn_fused, teacher_dir, tmp_path)
     reloaded = SmolVLAPolicy.from_pretrained(tmp_path)
     assert reloaded.config.expert_vlm_layers == ALTERNATE_PAIRS
     assert reloaded.config.expert_intermediate_size == 4096
     inputs = random_inputs(teacher)
-    assert torch.equal(k8_fuse.model.sample_actions(**inputs), reloaded.model.sample_actions(**inputs))
+    assert torch.equal(
+        shallow_ffn_fused.model.sample_actions(**inputs), reloaded.model.sample_actions(**inputs)
+    )

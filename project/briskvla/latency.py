@@ -16,7 +16,7 @@ more than a narrow one at batch size 1.
 Example:
     uv run python project/briskvla/latency.py \
         --policy teacher=lerobot/smolvla_libero \
-        --policy k8_pairs=outputs/students/k8_pairs \
+        --policy student_8L_spread=outputs/distill/student_8L_spread/best \
         --out outputs/latency/rtx3080.json
 """
 
@@ -25,13 +25,13 @@ import json
 import os
 import platform
 import statistics
-import subprocess
 import time
 from pathlib import Path
 
 import torch
-from build_student import TEACHER, TEACHER_REVISION
+from common import TEACHER, TEACHER_REVISION, cpu_name, git_info, gpu_state
 from torch.utils.flop_counter import FlopCounterMode
+from wandb_log import add_wandb_args, ensure_wandb_auth, log_latency_file, resolve_wandb_settings
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
@@ -222,41 +222,6 @@ def summarize(samples: list[dict]) -> dict:
     return out
 
 
-def gpu_state() -> dict | None:
-    fields = "name,driver_version,clocks.sm,clocks.max.sm,temperature.gpu,power.draw"
-    try:
-        line = subprocess.run(
-            ["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.splitlines()[0]
-    except (FileNotFoundError, subprocess.CalledProcessError, IndexError):
-        return None
-    return dict(zip(fields.split(","), (x.strip() for x in line.split(",")), strict=False))
-
-
-def cpu_name() -> str:
-    # Per-step time is limited by kernel launches from the CPU, so the CPU matters too
-    cpuinfo = Path("/proc/cpuinfo")
-    if cpuinfo.exists():
-        for line in cpuinfo.read_text().splitlines():
-            if line.startswith("model name"):
-                return line.split(":", 1)[1].strip()
-    try:
-        result = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True)
-        if result.stdout.strip():
-            return result.stdout.strip()
-    except FileNotFoundError:
-        pass
-    return platform.processor() or "unknown"
-
-
-def git_commit() -> str | None:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
-    return result.stdout.strip() or None
-
-
 def parse_policy_arg(arg: str) -> tuple[str, str]:
     if "=" in arg:
         name, path = arg.split("=", 1)
@@ -265,7 +230,9 @@ def parse_policy_arg(arg: str) -> tuple[str, str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--policy",
         action="append",
@@ -287,11 +254,14 @@ def main() -> None:
         default=None,
         help="Also time one expert SwiGLU at these intermediate widths (default 2048 3072 4096 8192)",
     )
+    add_wandb_args(parser)
     args = parser.parse_args()
     if args.breakdown and args.compile:
         parser.error("--breakdown uses module hooks, which torch.compile traces through. Use one at a time.")
     if (args.breakdown or args.ffn_width_sweep is not None) and not args.device.startswith("cuda"):
         parser.error("--breakdown and --ffn_width_sweep need CUDA")
+    wb = resolve_wandb_settings(args)
+    ensure_wandb_auth(wb["mode"])
 
     # Same precision settings as lerobot-eval
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -312,6 +282,8 @@ def main() -> None:
         results[name] = {
             "path": m["path"],
             "expert_vlm_layers": expert.expert_vlm_layers,
+            "num_expert_layers": len(expert.expert_vlm_layers),
+            "expert_intermediate_size": policy.config.expert_intermediate_size,
             "expert_params": sum(p.numel() for p in expert.lm_expert.parameters()),
             "total_params": sum(p.numel() for p in policy.parameters()),
             "flops": count_flops(policy, m["batch"]),
@@ -355,7 +327,7 @@ def main() -> None:
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
         "platform": platform.platform(),
-        "git_commit": git_commit(),
+        **git_info(),
         "warmup": args.warmup,
         "iters": per_round * args.rounds,
         "rounds": args.rounds,
@@ -367,6 +339,7 @@ def main() -> None:
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"meta": meta, "models": results, "ffn_width_sweep_us": sweep}, indent=2))
+    log_latency_file(args.out, **wb, force=True)
 
     gpu_name = (gpu_before or {}).get("name", args.device)
     print(f"\nGPU: {gpu_name}, CPU: {meta['cpu']}")
@@ -381,11 +354,17 @@ def main() -> None:
             for k, s in r["steps"].items():
                 ffn = s["ffn_ms"] / k
                 rest = s["non_ffn_ms"] / k
-                print(f"{name:<12}{k:>4}  per step: FFN {ffn:.2f} ms ({ffn / (ffn + rest):.0%}), rest {rest:.2f} ms")
+                print(
+                    f"{name:<12}{k:>4}  per step: FFN {ffn:.2f} ms ({ffn / (ffn + rest):.0%}), rest {rest:.2f} ms"
+                )
         f = r["flops"]
         fit = r.get("fit")
-        fit_text = f", fit: prefix {fit['prefix_ms']:.1f} ms + {fit['per_step_ms']:.1f} ms/step" if fit else ""
-        print(f"{name:<12}GFLOPs: prefix {f['prefix'] / 1e9:.1f}, per step {f['per_step'] / 1e9:.1f}{fit_text}")
+        fit_text = (
+            f", fit: prefix {fit['prefix_ms']:.1f} ms + {fit['per_step_ms']:.1f} ms/step" if fit else ""
+        )
+        print(
+            f"{name:<12}GFLOPs: prefix {f['prefix'] / 1e9:.1f}, per step {f['per_step'] / 1e9:.1f}{fit_text}"
+        )
     if sweep:
         print("\nOne SwiGLU on one chunk (us):  " + "  ".join(f"{w}: {t:.0f}" for w, t in sweep.items()))
     print(f"\nSaved to {args.out}")

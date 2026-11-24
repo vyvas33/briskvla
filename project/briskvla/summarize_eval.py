@@ -10,8 +10,9 @@ import argparse
 import json
 from pathlib import Path
 
-SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
-SHORT = {"libero_spatial": "Spatial", "libero_object": "Object", "libero_goal": "Goal", "libero_10": "Long"}
+from common import SUITE_SHORT, SUITES
+
+SHORT = SUITE_SHORT
 
 
 def load_run(run_dir: Path) -> dict:
@@ -24,11 +25,15 @@ def load_run(run_dir: Path) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--root", type=Path, default=Path("outputs/eval"))
     args = parser.parse_args()
 
-    runs = {d.name: load_run(d) for d in sorted(args.root.iterdir()) if d.is_dir()} if args.root.exists() else {}
+    runs = (
+        {d.name: load_run(d) for d in sorted(args.root.iterdir()) if d.is_dir()} if args.root.exists() else {}
+    )
     runs = {name: r for name, r in runs.items() if r}
     if not runs:
         print(f"No results under {args.root}")

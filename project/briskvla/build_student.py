@@ -1,21 +1,22 @@
-"""Build a BriskVLA student from the SmolVLA teacher.
+"""Build an untrained BriskVLA reduced-depth ("shallow") model from the SmolVLA teacher.
 
 Two ways to make the expert shallower. Both keep the teacher's VLM unchanged.
 
---layers keeps a subset of the teacher's expert layers. Each kept layer stays at its original depth
-and starts as an exact copy of the teacher's layer there.
+--layout or --layers keeps a subset of the teacher's expert layers. Each kept layer stays at its
+original depth and starts as an exact copy of the teacher's layer there.
 
 --group merges every `group` consecutive expert layers of a source model (the teacher or an earlier
-student) into one layer. The merged layer keeps the attention of one member (--keep). With --ffn fuse
+model) into one layer. The merged layer keeps the attention of one member (--keep). With --ffn fuse
 it keeps the FFNs of all members side by side as one wider FFN, which reads the same input and adds
 all their outputs to the residual stream. With --ffn drop it keeps only the kept member's FFN, which
 is the layer-dropping baseline with the same attention depths.
 
 Examples:
     uv run python project/briskvla/build_student.py \
-        --layers 0,1,4,5,8,9,12,13 --out outputs/students/k8_pairs
+        --layout spread --out outputs/students/shallow_8L_spread_untrained
     uv run python project/briskvla/build_student.py \
-        --group 2 --keep alternate --ffn fuse --out outputs/students/k8_fuse
+        --group 2 --keep alternate --ffn fuse \
+        --out outputs/students/shallow_8L_alternating_ffn_fused_untrained
 """
 
 import argparse
@@ -26,14 +27,11 @@ import shutil
 from pathlib import Path
 
 import torch
+from common import ALL_LAYOUT_CHOICES, TEACHER, TEACHER_REVISION, resolve_layout
 from huggingface_hub import snapshot_download
 
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-
-TEACHER = "lerobot/smolvla_libero"
-# The revision we evaluated on LIBERO
-TEACHER_REVISION = "a24f1f380461b665158d52acd140152c79e8b36d"
 
 EXPERT_LAYER_KEY = re.compile(r"lm_expert\.layers\.(\d+)\.")
 
@@ -107,10 +105,7 @@ def make_groups(num_layers: int, group: int, keep: str) -> list[tuple[list[int],
     groups = []
     for g, start in enumerate(range(0, num_layers, group)):
         members = list(range(start, start + group))
-        if keep == "first" or (keep == "alternate" and g % 2 == 0):
-            kept = members[0]
-        else:
-            kept = members[-1]
+        kept = members[0] if keep == "first" or (keep == "alternate" and g % 2 == 0) else members[-1]
         groups.append((members, kept))
     return groups
 
@@ -199,24 +194,33 @@ def count_params(module) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     which = parser.add_mutually_exclusive_group(required=True)
+    which.add_argument("--layout", choices=ALL_LAYOUT_CHOICES, help="Named expert layer layout")
     which.add_argument("--layers", help="VLM depths to keep an expert layer at, e.g. 0,1,4,5")
     which.add_argument("--group", type=int, help="Merge this many consecutive expert layers into one")
-    parser.add_argument("--keep", choices=KEEP_CHOICES, default="alternate", help="With --group: kept attention")
+    parser.add_argument(
+        "--keep", choices=KEEP_CHOICES, default="alternate", help="With --group: kept attention"
+    )
     parser.add_argument("--ffn", choices=FFN_CHOICES, default="fuse", help="With --group: fuse or drop FFNs")
     parser.add_argument("--out", required=True, type=Path, help="Folder to save the student in")
     parser.add_argument("--teacher", default=TEACHER, help="Hub repo id or local checkpoint folder")
     parser.add_argument("--revision", default=TEACHER_REVISION, help="Hub revision of the teacher")
     parser.add_argument(
-        "--source", type=Path, default=None, help="With --group: student folder to merge (default: the teacher)"
+        "--source",
+        type=Path,
+        default=None,
+        help="With --group: student folder to merge (default: the teacher)",
     )
     args = parser.parse_args()
 
     teacher_dir = download_teacher(args.teacher, args.revision)
     teacher = SmolVLAPolicy.from_pretrained(teacher_dir)
-    if args.layers:
-        student = build_student(teacher, [int(x) for x in args.layers.split(",")])
+    if args.layout or args.layers:
+        layers = resolve_layout(args.layout) if args.layout else [int(x) for x in args.layers.split(",")]
+        student = build_student(teacher, layers)
     else:
         source = SmolVLAPolicy.from_pretrained(args.source) if args.source else teacher
         student = compress(source, args.group, args.keep, args.ffn)
@@ -225,7 +229,9 @@ def main() -> None:
     expert = student.model.vlm_with_expert
     t = count_params(teacher.model.vlm_with_expert.lm_expert)
     s = count_params(expert.lm_expert)
-    print(f"Expert layers at depths {expert.expert_vlm_layers}, FFN width {student.config.expert_intermediate_size}")
+    print(
+        f"Expert layers at depths {expert.expert_vlm_layers}, FFN width {student.config.expert_intermediate_size}"
+    )
     print(f"Expert params: teacher {t / 1e6:.1f}M, student {s / 1e6:.1f}M")
     print(f"Saved to {args.out}")
 

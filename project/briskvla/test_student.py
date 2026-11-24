@@ -44,9 +44,7 @@ def random_inputs(policy: SmolVLAPolicy, batch_size: int = 1, seed: int = 0) -> 
         "noise": torch.randn(batch_size, cfg.chunk_size, cfg.max_action_dim, generator=g),
     }
     device = cfg.device
-    return {
-        k: [t.to(device) for t in v] if isinstance(v, list) else v.to(device) for k, v in inputs.items()
-    }
+    return {k: [t.to(device) for t in v] if isinstance(v, list) else v.to(device) for k, v in inputs.items()}
 
 
 @torch.no_grad()

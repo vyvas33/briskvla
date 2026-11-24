@@ -55,9 +55,9 @@ def random_batch(policy, batch_size: int = 2, seed: int = 0) -> dict:
 
 
 def test_hidden_pairs():
-    assert hidden_pairs(LAYOUTS["first8"], "same_depth") == [(d, d) for d in range(8)]
-    assert hidden_pairs(LAYOUTS["first8"], "uniform") == list(zip(range(8), range(1, 16, 2), strict=True))
-    assert hidden_pairs(LAYOUTS["last8"], "uniform")[-1] == (15, 15)
+    assert hidden_pairs(LAYOUTS["early"], "same_depth") == [(d, d) for d in range(8)]
+    assert hidden_pairs(LAYOUTS["early"], "uniform") == list(zip(range(8), range(1, 16, 2), strict=True))
+    assert hidden_pairs(LAYOUTS["late"], "uniform")[-1] == (15, 15)
 
 
 @torch.no_grad()
@@ -65,7 +65,9 @@ def test_full_student_has_zero_distill_loss(teacher):
     """A student with all 16 layers is the teacher, so every distillation loss must be 0."""
     student = load_student(teacher, list(range(16)), None).eval()
     torch.manual_seed(0)
-    losses = compute_losses(teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(list(range(16)), "same_depth"), 10)
+    losses = compute_losses(
+        teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(list(range(16)), "same_depth"), 10
+    )
     for name in ("velocity", "hidden", "output"):
         assert losses[name].item() < 1e-10, (name, losses[name].item())
 
@@ -80,7 +82,9 @@ def test_one_step_trains_only_the_student_expert(teacher, layout):
     opt = torch.optim.AdamW(params, lr=1e-4)
 
     torch.manual_seed(0)
-    losses = compute_losses(teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(layers, "uniform"), 3)
+    losses = compute_losses(
+        teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(layers, "uniform"), 3
+    )
     assert all(torch.isfinite(v) for v in losses.values()), losses
     assert losses["velocity"].item() > 0
     losses["total"].backward()
@@ -142,15 +146,17 @@ def make_optimizer(student, total_steps: int = 100):
 
 def test_resume_restores_student_optimizer_and_schedule(teacher, tmp_path):
     """A checkpoint written mid-run restores the trained weights, AdamW moments, LR step and RNG."""
-    layers = LAYOUTS["pairs"]
-    args = argparse.Namespace(**{k: None for k in RESUME_KEYS})
+    layers = LAYOUTS["spread"]
+    args = argparse.Namespace(**dict.fromkeys(RESUME_KEYS))
     teacher_dir = download_teacher()
 
     student = load_student(teacher, layers, None).train()
     opt, sched = make_optimizer(student)
     for step in range(3):
         torch.manual_seed(step)
-        losses = compute_losses(teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(layers, "same_depth"), 2)
+        losses = compute_losses(
+            teacher, student, random_batch(teacher), ALL_ON, hidden_pairs(layers, "same_depth"), 2
+        )
         opt.zero_grad()
         losses["total"].backward()
         opt.step()
@@ -176,4 +182,6 @@ def test_resume_restores_student_optimizer_and_schedule(teacher, tmp_path):
 
     other = argparse.Namespace(**{**vars(args), "steps": 9999})
     with pytest.raises(ValueError, match="settings differ"):
-        load_training_state(tmp_path, load_student(teacher, layers, None), *make_optimizer(fresh), other, layers)
+        load_training_state(
+            tmp_path, load_student(teacher, layers, None), *make_optimizer(fresh), other, layers
+        )
