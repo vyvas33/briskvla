@@ -82,6 +82,7 @@ class SmolVLMWithExpertModel(nn.Module):
         num_expert_layers: int = -1,
         num_vlm_layers: int = -1,
         expert_vlm_layers: list[int] | None = None,
+        expert_intermediate_size: int | None = None,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
         device: str = "auto",
@@ -119,7 +120,9 @@ class SmolVLMWithExpertModel(nn.Module):
         lm_expert_config = copy.deepcopy(config.text_config)
         hidden_size = lm_expert_config.hidden_size
         lm_expert_config.hidden_size = int(hidden_size * expert_width_multiplier)  # hidden_size // 2
-        lm_expert_config.intermediate_size = get_intermediate_size(int(hidden_size * expert_width_multiplier))
+        lm_expert_config.intermediate_size = expert_intermediate_size or get_intermediate_size(
+            int(hidden_size * expert_width_multiplier)
+        )
         lm_expert_config.num_hidden_layers = len(self.expert_vlm_layers)
         self.lm_expert = AutoModel.from_config(lm_expert_config)
 

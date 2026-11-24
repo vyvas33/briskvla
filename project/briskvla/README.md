@@ -14,16 +14,17 @@ revision used for the LIBERO teacher evaluation.
 | `src/lerobot/policies/smolvla/configuration_smolvla.py` | Adds the `expert_vlm_layers` config field and its validation |
 | `src/lerobot/policies/smolvla/modeling_smolvla.py` | Passes `expert_vlm_layers` to the VLM + expert model |
 | `src/lerobot/policies/smolvla/smolvlm_with_expert.py` | Places expert layers at the chosen depths, can record expert hidden states |
-| `project/briskvla/build_student.py` | Builds a student checkpoint from the teacher |
+| `project/briskvla/build_student.py` | Builds a student checkpoint from the teacher: drops layers (`--layers`) or merges groups of layers with FFN fusion (`--group`) |
 | `project/briskvla/distill_student.py` | Distills a student from the teacher on `lerobot/libero` |
 | `project/briskvla/run_ablation.py` | Layer ablation: distills and evaluates one student per layout |
 | `project/briskvla/test_student.py` | Tests for the student build |
 | `project/briskvla/test_distill.py` | Tests for the distillation losses |
+| `project/briskvla/test_fusion.py` | Tests for layer merging and FFN fusion |
 | `project/briskvla/latency.py` | Inference latency per action chunk, split into prefix and denoising |
 | `project/briskvla/run_eval.sh` | Latency and LIBERO success for one model, with fixed settings |
 | `project/briskvla/summarize_eval.py` | Success table for all evaluated models |
 | `project/briskvla/eval_colab.ipynb` | Runs `run_eval.sh` on Colab |
-| `project/briskvla/colab_distill.py` | Distills all layouts in parallel on a Colab VM, resuming interrupted ones (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_distill.py`) |
+| `project/briskvla/colab_distill.py` | Distills layouts and built students (`DISTILL_STUDENTS`) in parallel on a Colab VM, resuming interrupted ones (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_distill.py`) |
 | `project/briskvla/colab_eval.py` | Runs a queue of `run_eval.sh` success evals on a Colab VM, two at a time, skipping finished suites (`colab exec -s <session> --timeout 0 -f project/briskvla/colab_eval.py`) |
 
 ## Setup
@@ -125,6 +126,34 @@ The output folder has the same layout as the teacher checkpoint, so `lerobot-eva
 
 The saved config records the device it was built on (`mps` on a Mac). On a machine without that
 device the config falls back to an available one, and the eval command passes `--policy.device`.
+
+## FFN fusion
+
+`--group g` merges every `g` consecutive expert layers of a source model into one layer at the depth
+of the member chosen by `--keep` (`first`, `last`, or `alternate`: first member in even groups, last
+in odd ones). The merged layer has that member's attention. With `--ffn fuse` it also has the FFNs of
+all members as one FFN `g` times wider: each member's RMSNorm gain is folded into its gate and up
+weights and the hidden units are stacked, so the merged FFN equals the members' FFNs reading the same
+input with their outputs added (exact in float32, one bf16 rounding in the stored weights). With
+`--ffn drop` it keeps only the member's own FFN, the layer-dropping baseline with the same attention
+depths. `--source` merges an earlier student instead of the teacher, so 16 → 8 → 4 works.
+`expert_intermediate_size` in the config records the FFN width.
+
+```bash
+uv run python project/briskvla/build_student.py --group 2 --keep alternate --ffn fuse --out outputs/students/k8_fuse
+```
+
+`latency.py --breakdown` splits each denoising step into FFN time and the rest. First numbers on an
+RTX 5080 Laptop GPU (batch 1, K = 10; final latency numbers come from the RTX 3080):
+
+| Model | Expert params | Denoising | FFN share of a step |
+|---|---|---|---|
+| Teacher | 98.2M | 91 ms | 11% |
+| k8 drop, alternate depths | 49.1M | 47.8 ms | 10% |
+| k8 fuse, alternate depths | 84.5M | 48.5 ms | 12% |
+
+Held-out `chunk_mse_teacher` before any training (60 episodes, 15 held out): fuse/drop 0.615/0.497
+(alternate), 0.746/0.761 (first), 0.614/0.601 (last), and 0.337 for the `pairs` drop layout.
 
 ## Candidate layouts
 
