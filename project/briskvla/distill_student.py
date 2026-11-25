@@ -52,6 +52,7 @@ from common import (
     git_info,
     gpu_name,
     infer_model_role,
+    layout_name_for_layers,
     resolve_layout,
 )
 from wandb_log import WandbDistillLogger, add_wandb_args, ensure_wandb_auth, resolve_wandb_settings
@@ -391,12 +392,22 @@ def find_resume_dir(out: Path) -> Path | None:
     return None
 
 
-def save_training_state(path: Path, step: int, best: float, optimizer, scheduler, args, layers) -> None:
+def save_training_state(
+    path: Path,
+    step: int,
+    best: float,
+    optimizer,
+    scheduler,
+    args,
+    layers,
+    expert_intermediate_size: int | None = None,
+) -> None:
     torch.save(
         {
             "step": step,
             "best": best,
             "layers": list(layers),
+            "expert_intermediate_size": expert_intermediate_size,
             "args": {k: getattr(args, k) for k in RESUME_KEYS},
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -418,6 +429,14 @@ def load_training_state(resume_dir: Path, student, optimizer, scheduler, args, l
     mismatched = {k: (saved[k], getattr(args, k)) for k in RESUME_KEYS if saved.get(k) != getattr(args, k)}
     if list(state["layers"]) != list(layers):
         mismatched["layers"] = (state["layers"], list(layers))
+    if (
+        "expert_intermediate_size" in state
+        and state["expert_intermediate_size"] != student.config.expert_intermediate_size
+    ):
+        mismatched["expert_intermediate_size"] = (
+            state["expert_intermediate_size"],
+            student.config.expert_intermediate_size,
+        )
     if mismatched:
         raise ValueError(
             f"Cannot resume from {resume_dir}: settings differ (saved, now): {mismatched}. "
@@ -599,7 +618,9 @@ def main() -> None:
     run_info = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "role": role,
-        "layout_canonical": canonical_layout_name(args.layout) if args.layout else None,
+        "layout_canonical": canonical_layout_name(args.layout)
+        if args.layout
+        else layout_name_for_layers(layers),
         "layers": layers,
         "hidden_pairs": pairs,
         "expert_intermediate_size": student.config.expert_intermediate_size,
@@ -656,7 +677,16 @@ def main() -> None:
 
         def write_last(d: Path) -> None:
             save_student(student, teacher_dir, d)
-            save_training_state(d / TRAINING_STATE, step, best, optimizer, scheduler, args, layers)
+            save_training_state(
+                d / TRAINING_STATE,
+                step,
+                best,
+                optimizer,
+                scheduler,
+                args,
+                layers,
+                expert_intermediate_size=student.config.expert_intermediate_size,
+            )
 
         save_atomic(args.out / "last", write_last)
 

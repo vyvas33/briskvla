@@ -14,6 +14,9 @@ build_student.py (DISTILL_STUDENTS, `name=build args` separated by `;`), for exa
     DISTILL_STUDENTS="student_8L_alternating_ffn_fused=--group 2 --keep alternate --ffn fuse;student_8L_alternating=--group 2 --keep alternate --ffn drop"
 
 Built untrained checkpoints are saved once under $DISTILL_OUT/students/<name> and trained with --student.
+To use another Google account's Drive (e.g. a 5 TB account from a 25 GB Colab VM), upload its
+rclone.conf to /root/.config/rclone/rclone.conf (or use `colab_multi.sh mount`) and optionally set
+RCLONE_REMOTE=gdrive5tb so this script auto-mounts /content/drive/MyDrive if unmounted.
 """
 
 from __future__ import annotations
@@ -55,8 +58,46 @@ WANDB_MODE = os.environ.get("WANDB_MODE", "online")
 if WANDB_MODE == "online" and not os.environ.get("WANDB_API_KEY") and not (Path.home() / ".netrc").is_file():
     raise SystemExit("WANDB_API_KEY must be set in the environment (or set WANDB_MODE=offline).")
 
-if not Path("/content/drive/MyDrive").is_dir():
-    raise SystemExit("Google Drive is not mounted. Run `colab drivemount -s <session>` first.")
+RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "").strip()
+MOUNT_POINT = Path("/content/drive/MyDrive")
+if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode != 0:
+    rclone_conf = Path(os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
+    if not rclone_conf.is_file():
+        raise SystemExit(
+            f"RCLONE_REMOTE={RCLONE_REMOTE!r} is set but {rclone_conf} is missing. "
+            "Upload it or run `project/briskvla/colab_multi.sh mount <acct> <session>`."
+        )
+    if shutil.which("rclone") is None or shutil.which("fusermount3") is None:
+        subprocess.run("apt-get -qq update && apt-get -qq install -y fuse3 rclone > /dev/null", shell=True, check=True)
+    MOUNT_POINT.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "rclone",
+            "mount",
+            f"{RCLONE_REMOTE}:",
+            str(MOUNT_POINT),
+            "--vfs-cache-mode",
+            "writes",
+            "--vfs-cache-max-age",
+            "10m",
+            "--vfs-write-back",
+            "5s",
+            "--daemon",
+        ],
+        check=True,
+    )
+    for _ in range(30):
+        if subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode == 0:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(f"Timed out waiting for rclone mount of {RCLONE_REMOTE}: at {MOUNT_POINT}")
+
+if not MOUNT_POINT.is_dir():
+    raise SystemExit(
+        "Google Drive is not mounted. Run `colab drivemount -s <session>` or "
+        "`project/briskvla/colab_multi.sh mount <acct> <session>` first."
+    )
 OUT.mkdir(parents=True, exist_ok=True)
 
 

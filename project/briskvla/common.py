@@ -71,6 +71,14 @@ def resolve_layout(name: str) -> list[int]:
     return list(layers)
 
 
+def layout_name_for_layers(layers: list[int]) -> str | None:
+    """Return the canonical layout name matching `layers`, or None if custom."""
+    for name, depths in (*LAYOUTS.items(), *EXTRA_LAYOUTS.items()):
+        if depths == layers:
+            return name
+    return None
+
+
 def infer_model_role(w_velocity: float, w_hidden: float, w_output: float, steps: int = 1) -> str:
     """Return `student` when trained with any teacher distillation loss, else `shallow`."""
     if steps > 0 and (w_velocity > 0 or w_hidden > 0 or w_output > 0):

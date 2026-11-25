@@ -74,6 +74,9 @@ def test_resolve_layout_aliases_and_model_naming():
     assert common.resolve_layout("early") == common.resolve_layout("first8") == list(range(8))
     assert common.resolve_layout("late") == common.resolve_layout("last8") == list(range(8, 16))
     assert common.resolve_layout("alternating") == [0, 3, 4, 7, 8, 11, 12, 15]
+    assert common.layout_name_for_layers([0, 3, 4, 7, 8, 11, 12, 15]) == "alternating"
+    assert common.layout_name_for_layers([0, 1, 4, 5, 8, 9, 12, 13]) == "spread"
+    assert common.layout_name_for_layers([0, 7, 8, 15]) is None
 
     with pytest.raises(ValueError, match="Unknown layout"):
         common.resolve_layout("nonexistent")
@@ -271,6 +274,43 @@ def test_log_eval_run_and_distill_linkage(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert wandb_log.log_eval_run(eval_dir, force=False) is False
     assert wandb_log.log_eval_run(eval_dir, force=True) is True
     assert fake.runs[1].init_kwargs["id"] == run.init_kwargs["id"]
+
+
+def test_log_eval_run_preserves_shallow_role_with_distill_wandb_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    fake = _install_fake_wandb(monkeypatch, logged_in=True)
+
+    train_dir = tmp_path / "distill" / "shallow_8L_alternating_ffn_fused"
+    (train_dir / "best").mkdir(parents=True)
+    (train_dir / wandb_log.ID_FILE).write_text("cafebabe")
+    (train_dir / "run_info.json").write_text(json.dumps({"role": "shallow"}))
+    (train_dir / "best" / "config.json").write_text(
+        json.dumps({"expert_vlm_layers": [0, 3, 4, 7, 8, 11, 12, 15], "expert_intermediate_size": 4096})
+    )
+
+    eval_dir = tmp_path / "eval" / "shallow_8L_alternating_ffn_fused_K10"
+    (eval_dir / "libero_spatial").mkdir(parents=True)
+    (eval_dir / "run_metadata.json").write_text(
+        json.dumps(
+            {
+                "name": "shallow_8L_alternating_ffn_fused",
+                "policy_dir": str(train_dir / "best"),
+                "num_steps": 10,
+                "n_action_steps": 10,
+            }
+        )
+    )
+    (eval_dir / "libero_spatial" / "eval_info.json").write_text(
+        json.dumps({"overall": {"pc_success": 75.0, "n_success": 75, "n_episodes": 100}})
+    )
+
+    assert wandb_log.log_eval_run(eval_dir, group="ffn-shallow") is True
+    run = fake.runs[0]
+    assert run.init_kwargs["config"]["distill_wandb_id"] == "cafebabe"
+    assert run.init_kwargs["config"]["role"] == "shallow"
+    assert "role:shallow" in run.init_kwargs["tags"]
+    assert "role:student" not in run.init_kwargs["tags"]
 
 
 def test_log_latency_file_logs_per_k_summary_and_sweep(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
