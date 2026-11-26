@@ -34,6 +34,8 @@ DEFAULT_EMPTY_CAMERAS = 1
 
 DEFAULT_WANDB_PROJECT = "briskVLA"
 DEFAULT_WANDB_ENTITY = "djonnala-carnegie-mellon-university"
+DEFAULT_HF_NAMESPACE = "briskVLA"
+DEFAULT_HF_EVAL_DATASET = "briskVLA/eval-results"
 
 # Three primary placement-ablation layouts (kept at 3 so parametrized GPU tests stay fast).
 LAYOUTS: dict[str, list[int]] = {
@@ -69,6 +71,14 @@ def resolve_layout(name: str) -> list[int]:
     canon = canonical_layout_name(name)
     layers = LAYOUTS.get(canon) or EXTRA_LAYOUTS[canon]
     return list(layers)
+
+
+def layout_name_for_layers(layers: list[int]) -> str | None:
+    """Return the canonical layout name matching `layers`, or None if custom."""
+    for name, depths in (*LAYOUTS.items(), *EXTRA_LAYOUTS.items()):
+        if depths == layers:
+            return name
+    return None
 
 
 def infer_model_role(w_velocity: float, w_hidden: float, w_output: float, steps: int = 1) -> str:

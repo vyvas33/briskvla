@@ -14,6 +14,9 @@ build_student.py (DISTILL_STUDENTS, `name=build args` separated by `;`), for exa
     DISTILL_STUDENTS="student_8L_alternating_ffn_fused=--group 2 --keep alternate --ffn fuse;student_8L_alternating=--group 2 --keep alternate --ffn drop"
 
 Built untrained checkpoints are saved once under $DISTILL_OUT/students/<name> and trained with --student.
+To use another Google account's Drive (e.g. a 5 TB account from a 25 GB Colab VM), upload its
+rclone.conf to /root/.config/rclone/rclone.conf (or use `colab_multi.sh mount`) and optionally set
+RCLONE_REMOTE=gdrive5tb so this script auto-mounts /content/drive/MyDrive if unmounted.
 """
 
 from __future__ import annotations
@@ -30,8 +33,17 @@ from pathlib import Path
 REPO = Path("/content/briskvla")
 REPO_URL = "https://github.com/vyvas33/briskvla.git"
 BRANCH = os.environ.get("BRISKVLA_BRANCH", "briskvla")
+HF_NAMESPACE = os.environ.get("BRISKVLA_HF_NAMESPACE", "").strip()
+HF_PREFIX = os.environ.get("BRISKVLA_HF_PREFIX", "").strip()
+HF_PRIVATE = os.environ.get("HF_PRIVATE", "0") == "1"
 DRIVE = Path(os.environ.get("BRISKVLA_DRIVE", "/content/drive/MyDrive/briskvla"))
-OUT = Path(os.environ.get("DISTILL_OUT", str(DRIVE / "distill")))
+MOUNT_POINT = Path("/content/drive/MyDrive")
+DEFAULT_OUT = (
+    "/content/briskvla_local/distill"
+    if HF_NAMESPACE and not os.environ.get("BRISKVLA_DRIVE") and not MOUNT_POINT.is_dir()
+    else str(DRIVE / "distill")
+)
+OUT = Path(os.environ.get("DISTILL_OUT", DEFAULT_OUT))
 
 LAYOUTS = [x.strip() for x in os.environ.get("DISTILL_LAYOUTS", "spread,early,late").split(",") if x.strip()]
 STUDENTS = dict(
@@ -55,8 +67,47 @@ WANDB_MODE = os.environ.get("WANDB_MODE", "online")
 if WANDB_MODE == "online" and not os.environ.get("WANDB_API_KEY") and not (Path.home() / ".netrc").is_file():
     raise SystemExit("WANDB_API_KEY must be set in the environment (or set WANDB_MODE=offline).")
 
-if not Path("/content/drive/MyDrive").is_dir():
-    raise SystemExit("Google Drive is not mounted. Run `colab drivemount -s <session>` first.")
+RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "").strip()
+if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode != 0:
+    rclone_conf = Path(os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
+    if not rclone_conf.is_file():
+        raise SystemExit(
+            f"RCLONE_REMOTE={RCLONE_REMOTE!r} is set but {rclone_conf} is missing. "
+            "Upload it or run `project/briskvla/colab_multi.sh mount <acct> <session>`."
+        )
+    if shutil.which("rclone") is None or shutil.which("fusermount3") is None:
+        subprocess.run("apt-get -qq update && apt-get -qq install -y fuse3 rclone > /dev/null", shell=True, check=True)
+    MOUNT_POINT.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "rclone",
+            "mount",
+            f"{RCLONE_REMOTE}:",
+            str(MOUNT_POINT),
+            "--vfs-cache-mode",
+            "writes",
+            "--vfs-cache-max-age",
+            "10m",
+            "--vfs-write-back",
+            "5s",
+            "--daemon",
+        ],
+        check=True,
+    )
+    for _ in range(30):
+        if subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode == 0:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(f"Timed out waiting for rclone mount of {RCLONE_REMOTE}: at {MOUNT_POINT}")
+
+needs_drive = str(OUT).startswith("/content/drive/")
+if needs_drive and not MOUNT_POINT.is_dir():
+    raise SystemExit(
+        "Google Drive is not mounted. Run `colab drivemount -s <session>`, "
+        "`project/briskvla/colab_multi.sh mount <acct> <session>`, or set BRISKVLA_HF_NAMESPACE "
+        "to train on local SSD and push finished models directly to Hugging Face Hub."
+    )
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -78,6 +129,8 @@ if not SKIP_SETUP:
     sh("uv sync --locked --inexact --python 3.12 --extra briskvla", cwd=REPO)
 
 sh("uv run --no-sync python project/briskvla/wandb_log.py check-auth", cwd=REPO)
+if HF_NAMESPACE:
+    sh(f"uv run --no-sync python project/briskvla/hf_hub.py check-auth --namespace {HF_NAMESPACE}", cwd=REPO)
 
 WANDB_ARGS = [
     "--wandb_project",
@@ -87,6 +140,11 @@ WANDB_ARGS = [
     *(["--wandb_mode", WANDB_MODE] if WANDB_MODE in ("online", "offline") else []),
     *(["--wandb_group", WANDB_GROUP] if WANDB_GROUP else []),
     *(["--wandb_tags", WANDB_TAGS] if WANDB_TAGS else []),
+]
+HF_ARGS = [
+    *(["--hf_namespace", HF_NAMESPACE] if HF_NAMESPACE else []),
+    *(["--hf_prefix", HF_PREFIX] if HF_PREFIX else []),
+    *(["--hf_private"] if HF_PRIVATE else []),
 ]
 
 
@@ -164,6 +222,7 @@ def build(name: str) -> Path:
             *STUDENTS[name].split(),
             "--out",
             str(folder),
+            "--no_hf_push",
         ]
         print("build:", " ".join(cmd), flush=True)
         subprocess.run(cmd, cwd=REPO, check=True)
@@ -191,6 +250,7 @@ for entry, out_name in RUN_MAP:
         NUM_WORKERS,
         *ARGS,
         *WANDB_ARGS,
+        *HF_ARGS,
     ]
     print("start:", " ".join(cmd), flush=True)
     with open(OUT / f"{out_name}.log", "a") as log:

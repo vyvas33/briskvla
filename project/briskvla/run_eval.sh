@@ -5,7 +5,7 @@
 #   project/briskvla/run_eval.sh NAME POLICY
 #
 #   NAME    model run name, e.g. teacher, student_8L_spread, student_8L_alternating_ffn_fused, shallow_8L_early
-#   POLICY  "teacher" for lerobot/smolvla_libero at the evaluated revision, or a checkpoint folder
+#   POLICY  "teacher", a local checkpoint folder, or a Hugging Face repo id (owner/repo[@rev])
 #
 # Settings are environment variables. Defaults:
 #   STEPS="10 3"          denoising steps to evaluate
@@ -49,6 +49,9 @@ CKPT=${CKPT:-outputs/checkpoints}
 LATENCY=${LATENCY:-1}
 SUCCESS=${SUCCESS:-0}
 SKIP_SETUP=${SKIP_SETUP:-0}
+SKIP_EXISTING_REGISTRY=${SKIP_EXISTING_REGISTRY:-1}
+PUSH_EVAL_REGISTRY=${PUSH_EVAL_REGISTRY:-1}
+EVAL_REGISTRY_REPO=${EVAL_REGISTRY_REPO:-briskVLA/eval-results}
 PYTHON=${PYTHON:-}
 
 export MUJOCO_GL=${MUJOCO_GL:-egl}
@@ -108,8 +111,11 @@ if [[ "$POLICY" == teacher ]]; then
   if [[ ! -f "$POLICY_DIR/model.safetensors" ]]; then
     uv run --no-sync hf download "$TEACHER" --revision "$TEACHER_REVISION" --local-dir "$POLICY_DIR"
   fi
-else
+elif [[ -d "$POLICY" ]]; then
   POLICY_DIR=$POLICY
+else
+  # Support Hugging Face repo IDs (owner/repo or owner/repo@rev) transparently.
+  POLICY_DIR=$(uv run --no-sync python project/briskvla/hf_hub.py resolve "$POLICY")
 fi
 if [[ ! -f "$POLICY_DIR/model.safetensors" ]]; then
   echo "No model.safetensors in $POLICY_DIR" >&2
@@ -151,6 +157,19 @@ fi
 
 FAILED=()
 for K in $STEPS; do
+  if [[ "$SKIP_EXISTING_REGISTRY" == 1 && "${WANDB_MODE:-online}" != "offline" && "$SUITES" == "libero_spatial libero_object libero_goal libero_10" && "$N_ACTION_STEPS" =~ ^[0-9]+$ ]]; then
+    if uv run --no-sync python project/briskvla/eval_registry.py check \
+      --name "$NAME" \
+      --steps "$K" \
+      --episodes "$EPISODES" \
+      --seed "$SEED" \
+      --n_action_steps "$N_ACTION_STEPS" \
+      --repo "$EVAL_REGISTRY_REPO"; then
+      echo "[skip] $NAME K=$K already recorded in $EVAL_REGISTRY_REPO (set SKIP_EXISTING_REGISTRY=0 to force)"
+      continue
+    fi
+  fi
+
   RUN_DIR="$OUT/eval/${NAME}_K${K}"
   mkdir -p "$RUN_DIR"
   cat > "$RUN_DIR/run_metadata.json" <<EOF
@@ -209,6 +228,10 @@ EOF
   for f in "$RUN_DIR"/*/eval_info.json; do
     if [[ -f "$f" ]]; then
       uv run --no-sync python project/briskvla/wandb_log.py eval "$RUN_DIR" --force
+      if [[ "$PUSH_EVAL_REGISTRY" == 1 && "${WANDB_MODE:-online}" != "offline" ]]; then
+        uv run --no-sync python project/briskvla/eval_registry.py record "$RUN_DIR" --repo "$EVAL_REGISTRY_REPO" \
+          || echo "[warn] failed to push eval result to $EVAL_REGISTRY_REPO"
+      fi
       break
     fi
   done

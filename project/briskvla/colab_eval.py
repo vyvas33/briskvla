@@ -25,6 +25,10 @@ Optional environment:
     EVAL_N_ACTION_STEPS  actions before replanning (default: 10)
     EVAL_THREADS         OMP/MKL/OPENBLAS threads per process (default: 1)
     SKIP_SETUP           set to 1 to skip apt/git/uv setup
+    SKIP_EXISTING_REGISTRY  set to 1 (default) to skip (model, K) already recorded in EVAL_REGISTRY_REPO
+    PUSH_EVAL_REGISTRY      set to 1 (default) to push completed evals to EVAL_REGISTRY_REPO
+    EVAL_REGISTRY_REPO      HF dataset repo id for shared eval results (default: briskVLA/eval-results)
+    RCLONE_REMOTE        optional rclone remote name (e.g. gdrive5tb) to auto-mount at /content/drive/MyDrive
     WANDB_PROJECT        W&B project (default: briskVLA)
     WANDB_ENTITY         W&B entity (default: djonnala-carnegie-mellon-university)
     WANDB_GROUP          optional W&B group
@@ -44,7 +48,13 @@ REPO = Path("/content/briskvla")
 REPO_URL = "https://github.com/vyvas33/briskvla.git"
 BRANCH = os.environ.get("BRISKVLA_BRANCH", "briskvla")
 DRIVE = Path(os.environ.get("BRISKVLA_DRIVE", "/content/drive/MyDrive/briskvla"))
-OUT = Path(os.environ.get("EVAL_OUT", str(DRIVE / "outputs")))
+MOUNT_POINT = Path("/content/drive/MyDrive")
+DEFAULT_OUT = (
+    str(DRIVE / "outputs")
+    if os.environ.get("BRISKVLA_DRIVE") or MOUNT_POINT.is_dir() or os.environ.get("RCLONE_REMOTE")
+    else "/content/briskvla_local/outputs"
+)
+OUT = Path(os.environ.get("EVAL_OUT", DEFAULT_OUT))
 
 RAW_MODELS = os.environ.get("EVAL_MODELS", "")
 MODELS = dict(entry.split("=", 1) for entry in RAW_MODELS.split(";") if entry.strip())
@@ -65,13 +75,65 @@ WANDB_MODE = os.environ.get("WANDB_MODE", "online")
 if WANDB_MODE == "online" and not os.environ.get("WANDB_API_KEY") and not (Path.home() / ".netrc").is_file():
     raise SystemExit("WANDB_API_KEY must be set in the environment (or set WANDB_MODE=offline).")
 
-if not Path("/content/drive/MyDrive").is_dir():
-    raise SystemExit("Google Drive is not mounted. Run `colab drivemount -s <session>` first.")
+RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "").strip()
+if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode != 0:
+    rclone_conf = Path(os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
+    if not rclone_conf.is_file():
+        raise SystemExit(
+            f"RCLONE_REMOTE={RCLONE_REMOTE!r} is set but {rclone_conf} is missing. "
+            "Upload it or run `project/briskvla/colab_multi.sh mount <acct> <session>`."
+        )
+    if shutil.which("rclone") is None or shutil.which("fusermount3") is None:
+        subprocess.run("apt-get -qq update && apt-get -qq install -y fuse3 rclone > /dev/null", shell=True, check=True)
+    MOUNT_POINT.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "rclone",
+            "mount",
+            f"{RCLONE_REMOTE}:",
+            str(MOUNT_POINT),
+            "--vfs-cache-mode",
+            "writes",
+            "--vfs-cache-max-age",
+            "10m",
+            "--vfs-write-back",
+            "5s",
+            "--daemon",
+        ],
+        check=True,
+    )
+    for _ in range(30):
+        if subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode == 0:
+            break
+        time.sleep(0.5)
+    else:
+        raise SystemExit(f"Timed out waiting for rclone mount of {RCLONE_REMOTE}: at {MOUNT_POINT}")
+
+needs_drive = str(OUT).startswith("/content/drive/") or any(
+    p.startswith("/content/drive/") for p in MODELS.values()
+)
+if needs_drive and not MOUNT_POINT.is_dir():
+    raise SystemExit(
+        "Google Drive is not mounted. Run `colab drivemount -s <session>`, "
+        "`project/briskvla/colab_multi.sh mount <acct> <session>`, or use HF repo IDs in EVAL_MODELS."
+    )
+
+
+def _is_hf_repo_spec(policy: str) -> bool:
+    return (
+        not policy.startswith(("/", ".", "~"))
+        and "\\" not in policy
+        and "/" in policy
+        and len(policy.split("@", 1)[0].split("/")) == 2
+    )
+
 
 missing = [
     f"{name}={policy}"
     for name, policy in MODELS.items()
-    if policy != "teacher" and not (Path(policy) / "model.safetensors").is_file()
+    if policy != "teacher"
+    and not _is_hf_repo_spec(policy)
+    and not (Path(policy) / "model.safetensors").is_file()
 ]
 if missing:
     raise SystemExit(f"Missing model.safetensors for: {missing}")

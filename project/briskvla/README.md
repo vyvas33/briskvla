@@ -36,6 +36,7 @@ Every model and experiment name follows one self-explanatory format so an unfami
 | `src/lerobot/policies/smolvla/modeling_smolvla.py` | Passes `expert_vlm_layers` and `expert_intermediate_size` to the VLM + expert model |
 | `src/lerobot/policies/smolvla/smolvlm_with_expert.py` | Places expert layers at chosen depths, supports wider fused FFNs, records expert hidden states |
 | `project/briskvla/common.py` | Shared constants, layout aliases, role/model naming helpers, git/GPU/arch metadata |
+| `project/briskvla/hf_hub.py` | Hugging Face Hub upload/resolve/list helpers for team model sharing |
 | `project/briskvla/wandb_log.py` | Mandatory W&B logging for distillation, LIBERO eval, and latency + backfill CLI |
 | `project/briskvla/build_student.py` | Builds an untrained reduced-depth checkpoint: drops layers (`--layout`/`--layers`) or merges pairs with FFN fusion (`--group`) |
 | `project/briskvla/distill_student.py` | Trains/distills a `student` (with KD) or `shallow` (GT-only) model on `lerobot/libero` |
@@ -48,6 +49,7 @@ Every model and experiment name follows one self-explanatory format so an unfami
 | `project/briskvla/eval_colab.ipynb` | Interactive Colab notebook wrapper around `run_eval.sh` (supersedes the old `vyvas/libero-eval` notebook) |
 | `project/briskvla/plots.py` | Generates report PDF/PNG figures into `project/briskvla/figures/` (gitignored) |
 | `project/briskvla/test_wandb.py` | Unit tests for `common.py` naming helpers and W&B logging (CPU-only) |
+| `project/briskvla/test_hf_hub.py` | Unit tests for `hf_hub.py` repo parsing, staging, auth checks, and uploads (CPU-only) |
 | `project/briskvla/test_student.py` | Tests for reduced-depth student checkpoint construction |
 | `project/briskvla/test_distill.py` | Tests for distillation losses, shared KV cache, and checkpoint resume |
 | `project/briskvla/test_fusion.py` | Tests for layer merging and exact FFN fusion |
@@ -152,6 +154,33 @@ Teacher and student share the identical frozen VLM, so the prefix KV cache is co
 - `last/`: latest checkpoint plus `training_state.pt` (optimizer, scheduler, RNG states) for seamless resume after preemption.
 - `metrics.jsonl` and `run_info.json`: full training trace, architecture, git commit/branch/dirty state, GPU, and role (`student` vs `shallow`).
 - `wandb_id.txt`: persisted W&B run ID so resumed runs continue the exact same W&B run.
+
+## Hugging Face Hub Model Sharing
+
+All BriskVLA scripts support loading and auto-publishing checkpoints on Hugging Face Hub (`owner/repo` or `owner/repo@rev`), so teammates can share, evaluate, distill, or iteratively compress any model without Google Drive mounts:
+
+1. **Authenticate once** with a **Write** token (`uv run hf auth login` or set `HF_TOKEN`), and set your team namespace (e.g. `export BRISKVLA_HF_NAMESPACE=<org-or-user>`).
+2. **Auto-upload on training completion**:
+   ```bash
+   # Distill/train locally or on Colab SSD and push best/ + provenance (run_info.json, wandb_id.txt, metrics.jsonl) to HF Hub:
+   BRISKVLA_HF_NAMESPACE=<org> uv run python project/briskvla/distill_student.py \
+       --student outputs/students/shallow_8L_alternating_ffn_fused_untrained \
+       --w_velocity 0 --w_hidden 0 --w_output 0 --w_gt 1 \
+       --out outputs/distill/shallow_8L_alternating_ffn_fused
+   ```
+   Pass `--hf_repo <org>/<name>` to override the target repo, or `--no_hf_push` to skip uploading. On Colab, setting `BRISKVLA_HF_NAMESPACE` makes Google Drive optional (`colab_distill.py` trains on fast local SSD and pushes `best/` to HF Hub).
+3. **Upload an existing checkpoint folder / list team models**:
+   ```bash
+   uv run python project/briskvla/hf_hub.py upload outputs/distill/shallow_8L_alternating_ffn_fused --namespace <org>
+   uv run python project/briskvla/hf_hub.py list --namespace <org>
+   ```
+4. **Mix, match, evaluate, or compress directly from HF Hub**:
+   ```bash
+   SUCCESS=1 LATENCY=0 STEPS="10 1" project/briskvla/run_eval.sh shallow_8L_alternating_ffn_fused <org>/shallow_8L_alternating_ffn_fused
+   uv run python project/briskvla/latency.py --policy shallow_8L_alternating_ffn_fused=<org>/shallow_8L_alternating_ffn_fused --out outputs/latency/rtx3080.json
+   uv run python project/briskvla/build_student.py --source <org>/shallow_8L_alternating_ffn_fused --group 2 --keep alternate --ffn fuse --out outputs/students/shallow_4L_alternating_ffn_fused_untrained
+   uv run python project/briskvla/distill_student.py --student <org>/shallow_8L_alternating_ffn_fused --out outputs/distill/student_8L_alternating_ffn_fused_kd
+   ```
 
 ## Weights & Biases (Mandatory)
 

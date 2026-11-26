@@ -52,7 +52,16 @@ from common import (
     git_info,
     gpu_name,
     infer_model_role,
+    layout_name_for_layers,
     resolve_layout,
+)
+from hf_hub import (
+    add_hf_upload_args,
+    ensure_hf_write_auth,
+    resolve_hf_settings,
+    resolve_policy_path,
+    resolve_target_repo,
+    upload_model,
 )
 from wandb_log import WandbDistillLogger, add_wandb_args, ensure_wandb_auth, resolve_wandb_settings
 
@@ -81,9 +90,12 @@ def load_teacher(teacher_dir: Path, device: str, empty_cameras: int) -> SmolVLAP
     return teacher
 
 
-def load_student(teacher: SmolVLAPolicy, layers: list[int] | None, student_dir: Path | None) -> SmolVLAPolicy:
-    """Build the student from the teacher, or load one saved earlier (e.g. by build_student.py)."""
-    if student_dir is not None:
+def load_student(
+    teacher: SmolVLAPolicy, layers: list[int] | None, student_spec: str | Path | None
+) -> SmolVLAPolicy:
+    """Build the student from the teacher, or load a local checkpoint / HF repo id."""
+    if student_spec is not None:
+        student_dir = resolve_policy_path(student_spec)
         config = PreTrainedConfig.from_pretrained(student_dir)
         config.device = teacher.config.device
         config.empty_cameras = teacher.config.empty_cameras
@@ -391,12 +403,22 @@ def find_resume_dir(out: Path) -> Path | None:
     return None
 
 
-def save_training_state(path: Path, step: int, best: float, optimizer, scheduler, args, layers) -> None:
+def save_training_state(
+    path: Path,
+    step: int,
+    best: float,
+    optimizer,
+    scheduler,
+    args,
+    layers,
+    expert_intermediate_size: int | None = None,
+) -> None:
     torch.save(
         {
             "step": step,
             "best": best,
             "layers": list(layers),
+            "expert_intermediate_size": expert_intermediate_size,
             "args": {k: getattr(args, k) for k in RESUME_KEYS},
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -418,6 +440,14 @@ def load_training_state(resume_dir: Path, student, optimizer, scheduler, args, l
     mismatched = {k: (saved[k], getattr(args, k)) for k in RESUME_KEYS if saved.get(k) != getattr(args, k)}
     if list(state["layers"]) != list(layers):
         mismatched["layers"] = (state["layers"], list(layers))
+    if (
+        "expert_intermediate_size" in state
+        and state["expert_intermediate_size"] != student.config.expert_intermediate_size
+    ):
+        mismatched["expert_intermediate_size"] = (
+            state["expert_intermediate_size"],
+            student.config.expert_intermediate_size,
+        )
     if mismatched:
         raise ValueError(
             f"Cannot resume from {resume_dir}: settings differ (saved, now): {mismatched}. "
@@ -472,7 +502,11 @@ def parse_args() -> argparse.Namespace:
         "--layout", choices=ALL_LAYOUT_CHOICES, help="Named expert layout (canonical or alias)"
     )
     which.add_argument("--layers", help="Comma-separated depths to keep an expert layer at")
-    which.add_argument("--student", type=Path, help="Start from a saved checkpoint folder")
+    which.add_argument(
+        "--student",
+        type=str,
+        help="Start from a saved checkpoint folder or HF repo id ('owner/repo[@rev]')",
+    )
     p.add_argument("--out", required=True, type=Path)
     p.add_argument("--teacher", default=TEACHER)
     p.add_argument("--revision", default=TEACHER_REVISION)
@@ -517,6 +551,7 @@ def parse_args() -> argparse.Namespace:
         "--no_resume", action="store_true", help="Fail instead of resuming if --out has a checkpoint"
     )
     add_wandb_args(p)
+    add_hf_upload_args(p)
     return p.parse_args()
 
 
@@ -524,6 +559,10 @@ def main() -> None:
     args = parse_args()
     wb = resolve_wandb_settings(args)
     ensure_wandb_auth(wb["mode"])
+    hf = resolve_hf_settings(args)
+    hf_repo = resolve_target_repo(args.out.name, repo=hf["repo"], namespace=hf["namespace"], prefix=hf["prefix"])
+    if hf_repo:
+        ensure_hf_write_auth(hf_repo.split("/", 1)[0])
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -599,7 +638,9 @@ def main() -> None:
     run_info = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "role": role,
-        "layout_canonical": canonical_layout_name(args.layout) if args.layout else None,
+        "layout_canonical": canonical_layout_name(args.layout)
+        if args.layout
+        else layout_name_for_layers(layers),
         "layers": layers,
         "hidden_pairs": pairs,
         "expert_intermediate_size": student.config.expert_intermediate_size,
@@ -611,6 +652,7 @@ def main() -> None:
         "expert_params_teacher": count_params(teacher.model.vlm_with_expert.lm_expert),
         "expert_params_student": count_params(student.model.vlm_with_expert.lm_expert),
         "trainable_params": sum(p.numel() for p in params),
+        "hf_repo": hf_repo,
         "resumed_from_step": start_step,
         "gpu": gpu_name(),
         "date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -656,7 +698,16 @@ def main() -> None:
 
         def write_last(d: Path) -> None:
             save_student(student, teacher_dir, d)
-            save_training_state(d / TRAINING_STATE, step, best, optimizer, scheduler, args, layers)
+            save_training_state(
+                d / TRAINING_STATE,
+                step,
+                best,
+                optimizer,
+                scheduler,
+                args,
+                layers,
+                expert_intermediate_size=student.config.expert_intermediate_size,
+            )
 
         save_atomic(args.out / "last", write_last)
 
@@ -716,6 +767,18 @@ def main() -> None:
     }
     log({"split": "final", "step": args.steps, "best_chunk_mse_teacher": best, **latency})
     metrics_file.close()
+    if hf_repo:
+        hf_url = upload_model(
+            args.out,
+            hf_repo,
+            private=hf["private"],
+            commit_message=f"Upload {args.out.name} (step {args.steps}, best chunk_mse_teacher={best:.4f})",
+        )
+        run_info["hf_url"] = hf_url
+        (args.out / "run_info.json").write_text(json.dumps(run_info, indent=2))
+        wandb_logger.run.summary["hf_repo"] = hf_repo
+        wandb_logger.run.summary["hf_url"] = hf_url
+        print(f"Uploaded best checkpoint to Hugging Face Hub: {hf_url}")
     wandb_logger.finish()
 
 

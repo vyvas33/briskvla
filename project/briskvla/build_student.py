@@ -27,7 +27,15 @@ import shutil
 from pathlib import Path
 
 import torch
-from common import ALL_LAYOUT_CHOICES, TEACHER, TEACHER_REVISION, resolve_layout
+from common import ALL_LAYOUT_CHOICES, TEACHER, TEACHER_REVISION, canonical_layout_name, resolve_layout
+from hf_hub import (
+    add_hf_upload_args,
+    ensure_hf_write_auth,
+    resolve_hf_settings,
+    resolve_policy_path,
+    resolve_target_repo,
+    upload_model,
+)
 from huggingface_hub import snapshot_download
 
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
@@ -110,6 +118,25 @@ def make_groups(num_layers: int, group: int, keep: str) -> list[tuple[list[int],
     return groups
 
 
+# 16-layer teacher -> 8-layer layout fusion pairs where every kept layer fuses with a dropped
+# layer of the same even/odd attention parity (preserving all 16 teacher FFNs once each).
+LAYOUT_FUSION_GROUPS: dict[str, list[tuple[list[int], int]]] = {
+    "early": [([j, j + 8], j) for j in range(8)],
+    "spread": [
+        ([0, 2], 0),
+        ([1, 3], 1),
+        ([4, 6], 4),
+        ([5, 7], 5),
+        ([8, 10], 8),
+        ([9, 11], 9),
+        ([12, 14], 12),
+        ([13, 15], 13),
+    ],
+    "late": [([j + 8, j], j + 8) for j in range(8)],
+    "alternating": make_groups(16, 2, "alternate"),
+}
+
+
 def fuse_ffns(layer_weights: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     """One SwiGLU equal to the sum of several, each with its own pre-FFN RMSNorm gain.
 
@@ -137,17 +164,19 @@ def is_ffn_key(name: str) -> bool:
     return name.startswith("mlp.") or name.startswith("post_attention_layernorm.")
 
 
-def compress(source: SmolVLAPolicy, group: int, keep: str = "alternate", ffn: str = "fuse") -> SmolVLAPolicy:
-    """Merge every `group` consecutive expert layers of `source` into one layer.
-
-    `source` can be the teacher or any student built here, including an already merged one. The
-    merged layer sits at the depth of the kept member, with that member's attention and input norm.
-    `ffn="fuse"` gives it the FFNs of all members (see fuse_ffns), `ffn="drop"` only the kept one's.
-    """
+def compress_groups(
+    source: SmolVLAPolicy, groups: list[tuple[list[int], int]], ffn: str = "fuse"
+) -> SmolVLAPolicy:
+    """Merge explicit ``(members, kept)`` layer groups of ``source`` into one compressed model."""
     if ffn not in FFN_CHOICES:
         raise ValueError(f"ffn must be one of {FFN_CHOICES}, got {ffn}")
+    if not groups:
+        raise ValueError("groups must be non-empty")
+    group_size = len(groups[0][0])
+    if group_size < 1 or any(len(members) != group_size for members, _ in groups):
+        raise ValueError("all groups must have the same non-empty size")
+
     depths = source.model.vlm_with_expert.expert_vlm_layers
-    groups = make_groups(len(depths), group, keep)
 
     # Split the state dict into per-layer weights (by source expert index) and everything else
     per_layer: dict[int, dict[str, torch.Tensor]] = {}
@@ -160,7 +189,7 @@ def compress(source: SmolVLAPolicy, group: int, keep: str = "alternate", ffn: st
         per_layer.setdefault(int(match.group(1)), {})[key[match.end() :]] = tensor
 
     width = per_layer[0]["mlp.gate_proj.weight"].shape[0]
-    new_width = width * group if ffn == "fuse" else width
+    new_width = width * group_size if ffn == "fuse" else width
     new_state = dict(other)
     for j, (members, kept) in enumerate(groups):
         weights = {k: v for k, v in per_layer[kept].items() if not is_ffn_key(k)}
@@ -177,6 +206,18 @@ def compress(source: SmolVLAPolicy, group: int, keep: str = "alternate", ffn: st
     student.to(source.config.device)
     student.eval()
     return student
+
+
+def compress(source: SmolVLAPolicy, group: int, keep: str = "alternate", ffn: str = "fuse") -> SmolVLAPolicy:
+    """Merge every `group` consecutive expert layers of `source` into one layer.
+
+    `source` can be the teacher or any student built here, including an already merged one. The
+    merged layer sits at the depth of the kept member, with that member's attention and input norm.
+    `ffn="fuse"` gives it the FFNs of all members (see fuse_ffns), `ffn="drop"` only the kept one's.
+    """
+    depths = source.model.vlm_with_expert.expert_vlm_layers
+    groups = make_groups(len(depths), group, keep)
+    return compress_groups(source, groups, ffn=ffn)
 
 
 def save_student(student: SmolVLAPolicy, teacher_dir: Path, out_dir: Path) -> None:
@@ -204,26 +245,52 @@ def main() -> None:
     parser.add_argument(
         "--keep", choices=KEEP_CHOICES, default="alternate", help="With --group: kept attention"
     )
-    parser.add_argument("--ffn", choices=FFN_CHOICES, default="fuse", help="With --group: fuse or drop FFNs")
+    parser.add_argument(
+        "--ffn",
+        choices=FFN_CHOICES,
+        default=None,
+        help="With --group or --layout: fuse or drop FFNs (default: fuse for --group, drop for --layout)",
+    )
     parser.add_argument("--out", required=True, type=Path, help="Folder to save the student in")
     parser.add_argument("--teacher", default=TEACHER, help="Hub repo id or local checkpoint folder")
     parser.add_argument("--revision", default=TEACHER_REVISION, help="Hub revision of the teacher")
     parser.add_argument(
         "--source",
-        type=Path,
+        type=str,
         default=None,
-        help="With --group: student folder to merge (default: the teacher)",
+        help="With --group: local checkpoint dir or HF repo id ('owner/repo[@rev]') to merge (default: teacher)",
     )
+    add_hf_upload_args(parser)
     args = parser.parse_args()
+
+    hf = resolve_hf_settings(args)
+    hf_repo = resolve_target_repo(args.out.name, repo=hf["repo"], namespace=hf["namespace"], prefix=hf["prefix"])
+    if hf_repo:
+        ensure_hf_write_auth(hf_repo.split("/", 1)[0])
 
     teacher_dir = download_teacher(args.teacher, args.revision)
     teacher = SmolVLAPolicy.from_pretrained(teacher_dir)
-    if args.layout or args.layers:
-        layers = resolve_layout(args.layout) if args.layout else [int(x) for x in args.layers.split(",")]
+    if args.layout:
+        ffn = args.ffn or "drop"
+        if ffn == "fuse":
+            canon = canonical_layout_name(args.layout)
+            if canon not in LAYOUT_FUSION_GROUPS:
+                raise SystemExit(f"No 16-layer FFN fusion pairing defined for layout {canon!r}")
+            if len(teacher.model.vlm_with_expert.expert_vlm_layers) != 16:
+                raise SystemExit("--layout with --ffn fuse requires a 16-layer teacher model")
+            student = compress_groups(teacher, LAYOUT_FUSION_GROUPS[canon], ffn="fuse")
+        else:
+            student = build_student(teacher, resolve_layout(args.layout))
+    elif args.layers:
+        if args.ffn == "fuse":
+            raise SystemExit("--ffn fuse is only supported with --group or --layout, not --layers")
+        layers = [int(x) for x in args.layers.split(",")]
         student = build_student(teacher, layers)
     else:
-        source = SmolVLAPolicy.from_pretrained(args.source) if args.source else teacher
-        student = compress(source, args.group, args.keep, args.ffn)
+        ffn = args.ffn or "fuse"
+        source_path = resolve_policy_path(args.source) if args.source else None
+        source = SmolVLAPolicy.from_pretrained(source_path) if source_path else teacher
+        student = compress(source, args.group, args.keep, ffn)
     save_student(student, teacher_dir, args.out)
 
     expert = student.model.vlm_with_expert
@@ -234,6 +301,9 @@ def main() -> None:
     )
     print(f"Expert params: teacher {t / 1e6:.1f}M, student {s / 1e6:.1f}M")
     print(f"Saved to {args.out}")
+    if hf_repo:
+        url = upload_model(args.out, hf_repo, private=hf["private"])
+        print(f"Uploaded to Hugging Face Hub: {url}")
 
 
 if __name__ == "__main__":

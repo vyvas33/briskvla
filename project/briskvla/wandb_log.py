@@ -148,10 +148,10 @@ def _infer_role_from_name_or_cfg(name: str, cfg: dict[str, Any]) -> str | None:
     low = name.lower()
     if low == "teacher":
         return "teacher"
-    if low.startswith("student_") or "distilled" in low or cfg.get("distill_wandb_id"):
-        return "student"
     if low.startswith("shallow_") or "nokd" in low or "untrained" in low:
         return "shallow"
+    if low.startswith("student_") or "distilled" in low:
+        return "student"
     args_cfg = cfg.get("args")
     if isinstance(args_cfg, dict) and any(k in args_cfg for k in ("w_velocity", "w_hidden", "w_output")):
         return infer_model_role(
@@ -160,6 +160,8 @@ def _infer_role_from_name_or_cfg(name: str, cfg: dict[str, Any]) -> str | None:
             float(args_cfg.get("w_output", 0.0)),
             int(args_cfg.get("steps", 1)),
         )
+    if cfg.get("distill_wandb_id"):
+        return "student"
     return None
 
 
@@ -336,6 +338,15 @@ def log_eval_run(
         for cand in (Path(policy_dir).parent / ID_FILE, Path(policy_dir) / ID_FILE):
             if cand.is_file():
                 cfg.setdefault("distill_wandb_id", cand.read_text().strip())
+                break
+        for info_cand in (Path(policy_dir).parent / "run_info.json", Path(policy_dir) / "run_info.json"):
+            if info_cand.is_file():
+                try:
+                    info = json.loads(info_cand.read_text())
+                except (OSError, json.JSONDecodeError):
+                    break
+                if info.get("role") in ("student", "shallow", "teacher"):
+                    cfg.setdefault("role", info["role"])
                 break
     cfg = _enrich_config(cfg)
 
