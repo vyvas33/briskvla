@@ -25,6 +25,9 @@ Optional environment:
     EVAL_N_ACTION_STEPS  actions before replanning (default: 10)
     EVAL_THREADS         OMP/MKL/OPENBLAS threads per process (default: 1)
     SKIP_SETUP           set to 1 to skip apt/git/uv setup
+    SKIP_EXISTING_REGISTRY  set to 1 (default) to skip (model, K) already recorded in EVAL_REGISTRY_REPO
+    PUSH_EVAL_REGISTRY      set to 1 (default) to push completed evals to EVAL_REGISTRY_REPO
+    EVAL_REGISTRY_REPO      HF dataset repo id for shared eval results (default: briskVLA/eval-results)
     RCLONE_REMOTE        optional rclone remote name (e.g. gdrive5tb) to auto-mount at /content/drive/MyDrive
     WANDB_PROJECT        W&B project (default: briskVLA)
     WANDB_ENTITY         W&B entity (default: djonnala-carnegie-mellon-university)

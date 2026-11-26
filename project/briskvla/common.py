@@ -35,6 +35,7 @@ DEFAULT_EMPTY_CAMERAS = 1
 DEFAULT_WANDB_PROJECT = "briskVLA"
 DEFAULT_WANDB_ENTITY = "djonnala-carnegie-mellon-university"
 DEFAULT_HF_NAMESPACE = "briskVLA"
+DEFAULT_HF_EVAL_DATASET = "briskVLA/eval-results"
 
 # Three primary placement-ablation layouts (kept at 3 so parametrized GPU tests stay fast).
 LAYOUTS: dict[str, list[int]] = {
