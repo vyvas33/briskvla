@@ -243,11 +243,11 @@ Every trained model has 8 expert layers (`8L`), trained for 5000 steps at batch 
 | Model | K | Spatial | Object | Goal | Long | Avg |
 |---|---|---|---|---|---|---|
 | Teacher (`16L`, 98.2M) | 10 | 79 | 91 | 89 | 69 | **82.0** |
-| Student — 8L Early (distilled) | 10 | 79 | 87 | 83 | 64 | **78.2** |
-| Student — 8L Spread (distilled) | 10 | 78 | 79 | 79 | 75 | **77.8** |
+| Student — 8L Early (distilled)† | 10 | 77.3 | 86.3 | 83.0 | 66.3 | **78.3** |
+| Student — 8L Spread (distilled)† | 10 | 75.3 | 82.7 | 85.0 | 70.0 | **78.3** |
 | Student — 8L Late (distilled) | 10 | 67 | 82 | 78 | 56 | 70.8 |
-| Shallow — 8L Early (no KD) | 10 | 75 | 87 | 74 | 67 | 75.8 |
-| Shallow — 8L Spread (no KD) | 10 | 62 | 79 | 78 | 69 | 72.0 |
+| Shallow — 8L Early (no KD)† | 10 | 73.7 | 86.3 | 74.7 | 67.3 | 75.5 |
+| Shallow — 8L Spread (no KD)† | 10 | 63.0 | 80.3 | 79.3 | 64.0 | 71.7 |
 | Shallow — 8L Late (no KD) | 10 | 63 | 66 | 75 | 48 | 63.0 |
 | Teacher (`16L`, 98.2M) | 3 | 76 | 90 | 89 | 71 | **81.5** |
 | Student — 8L Early (distilled) | 3 | 68 | 42 | 52 | 52 | 53.5 |
@@ -262,6 +262,22 @@ Every trained model has 8 expert layers (`8L`), trained for 5000 steps at batch 
 | Shallow — 8L Early (no KD) | 1 | 78 | 81 | 81 | 66 | 76.5 |
 | Shallow — 8L Spread (no KD) | 1 | 66 | 81 | 74 | 66 | 71.8 |
 | Shallow — 8L Late (no KD) | 1 | 57 | 67 | 60 | 52 | 59.0 |
+
+† 300 episodes per suite (±4–5.5 points per cell, about ±2.5 for the average): the 100-episode run
+pooled with a second run at `EPISODES=20`. Both use `seed=1000`. Episode `k` of a task always starts
+from LIBERO's fixed init state `k` (50 per task), so init states 0–9 were run twice (with different
+sampling noise, since batch size and machine differ) and 10–19 once. The 200-episode run alone:
+
+| Model | Spatial | Object | Goal | Long | Avg |
+|---|---|---|---|---|---|
+| Student — 8L Spread (distilled) | 74.0 | 84.5 | 88.0 | 67.5 | 78.5 |
+| Student — 8L Early (distilled) | 76.5 | 86.0 | 83.0 | 67.5 | 78.2 |
+| Shallow — 8L Early (no KD) | 73.0 | 86.0 | 75.0 | 67.5 | 75.4 |
+| Shallow — 8L Spread (no KD) | 63.5 | 81.0 | 80.0 | 61.5 | 71.5 |
+
+That run used an RTX 5070 Laptop GPU under WSL with CPU rendering (`LIBGL_ALWAYS_SOFTWARE=1
+GALLIUM_DRIVER=llvmpipe`, because WSL's D3D12 GL picked the Intel iGPU and crashed) and batch size 2.
+Results are in W&B group `haozh_K10_ep20`.
 
 ### FFN Fusion (`hidden_map=uniform`)
 
