@@ -52,17 +52,27 @@ def download_teacher(teacher: str = TEACHER, revision: str = TEACHER_REVISION) -
 
 
 def make_student_config(
-    teacher_config: SmolVLAConfig, layers: list[int], intermediate_size: int | None = None
+    teacher_config: SmolVLAConfig,
+    layers: list[int],
+    intermediate_size: int | None = None,
+    intermediate_sizes: list[int] | None = None,
 ) -> SmolVLAConfig:
     """Teacher config with a smaller expert. The VLM and state projection stay frozen so the
-    student sees exactly the teacher's prefix. `intermediate_size` sets the expert FFN width
-    (None keeps the source's)."""
-    if intermediate_size is None:
-        intermediate_size = teacher_config.expert_intermediate_size
+    student sees exactly the teacher's prefix. `intermediate_size` (or per-layer `intermediate_sizes`)
+    sets the expert FFN width (None keeps the source's)."""
+    if intermediate_sizes is not None:
+        expert_size = None
+        expert_sizes: list[int] | None = list(intermediate_sizes)
+    else:
+        expert_size = (
+            teacher_config.expert_intermediate_size if intermediate_size is None else intermediate_size
+        )
+        expert_sizes = None
     return dataclasses.replace(
         copy.deepcopy(teacher_config),
         expert_vlm_layers=list(layers),
-        expert_intermediate_size=intermediate_size,
+        expert_intermediate_size=expert_size,
+        expert_intermediate_sizes=expert_sizes,
         train_expert_only=True,
         freeze_vision_encoder=True,
         train_state_proj=False,
@@ -118,10 +128,11 @@ def make_groups(num_layers: int, group: int, keep: str) -> list[tuple[list[int],
     return groups
 
 
-# 16-layer teacher -> 8-layer layout fusion pairs where every kept layer fuses with a dropped
-# layer of the same even/odd attention parity (preserving all 16 teacher FFNs once each).
+# 16-layer teacher -> 8-layer layout fusion pairs (preserving all 16 teacher FFNs once each).
+# `early` maps sequential adjacent FFN pairs (0,1)->0, (2,3)->1, ..., (14,15)->7 onto attention
+# depths 0..7; `spread` and `late` fuse same-parity pairs.
 LAYOUT_FUSION_GROUPS: dict[str, list[tuple[list[int], int]]] = {
-    "early": [([j, j + 8], j) for j in range(8)],
+    "early": [([2 * j, 2 * j + 1], j) for j in range(8)],
     "spread": [
         ([0, 2], 0),
         ([1, 3], 1),
@@ -134,6 +145,16 @@ LAYOUT_FUSION_GROUPS: dict[str, list[tuple[list[int], int]]] = {
     ],
     "late": [([j + 8, j], j + 8) for j in range(8)],
     "alternating": make_groups(16, 2, "alternate"),
+    "partial_fuse": [
+        ([0], 0),
+        ([1], 1),
+        ([2], 2),
+        ([3], 3),
+        ([8, 9], 8),
+        ([10, 11], 11),
+        ([12, 13], 12),
+        ([14, 15], 15),
+    ],
 }
 
 
@@ -170,11 +191,8 @@ def compress_groups(
     """Merge explicit ``(members, kept)`` layer groups of ``source`` into one compressed model."""
     if ffn not in FFN_CHOICES:
         raise ValueError(f"ffn must be one of {FFN_CHOICES}, got {ffn}")
-    if not groups:
-        raise ValueError("groups must be non-empty")
-    group_size = len(groups[0][0])
-    if group_size < 1 or any(len(members) != group_size for members, _ in groups):
-        raise ValueError("all groups must have the same non-empty size")
+    if not groups or any(len(members) < 1 for members, _ in groups):
+        raise ValueError("groups must be non-empty and each group must have at least one member")
 
     depths = source.model.vlm_with_expert.expert_vlm_layers
 
@@ -188,19 +206,24 @@ def compress_groups(
             continue
         per_layer.setdefault(int(match.group(1)), {})[key[match.end() :]] = tensor
 
-    width = per_layer[0]["mlp.gate_proj.weight"].shape[0]
-    new_width = width * group_size if ffn == "fuse" else width
+    widths: list[int] = []
     new_state = dict(other)
     for j, (members, kept) in enumerate(groups):
         weights = {k: v for k, v in per_layer[kept].items() if not is_ffn_key(k)}
-        if ffn == "fuse":
+        if ffn == "fuse" and len(members) > 1:
             weights.update(fuse_ffns([per_layer[m] for m in members]))
+            widths.append(sum(per_layer[m]["mlp.gate_proj.weight"].shape[0] for m in members))
         else:
             weights.update({k: v for k, v in per_layer[kept].items() if is_ffn_key(k)})
+            widths.append(per_layer[kept]["mlp.gate_proj.weight"].shape[0])
         new_state.update({f"{EXPERT_PREFIX}.{j}.{k}": v for k, v in weights.items()})
 
     new_depths = [depths[kept] for _, kept in groups]
-    student = SmolVLAPolicy(make_student_config(source.config, new_depths, new_width))
+    if len(set(widths)) == 1:
+        cfg = make_student_config(source.config, new_depths, intermediate_size=widths[0])
+    else:
+        cfg = make_student_config(source.config, new_depths, intermediate_sizes=widths)
+    student = SmolVLAPolicy(cfg)
     # strict=True fails if the merge missed or added any weight
     student.load_state_dict(new_state, strict=True)
     student.to(source.config.device)
@@ -296,9 +319,8 @@ def main() -> None:
     expert = student.model.vlm_with_expert
     t = count_params(teacher.model.vlm_with_expert.lm_expert)
     s = count_params(expert.lm_expert)
-    print(
-        f"Expert layers at depths {expert.expert_vlm_layers}, FFN width {student.config.expert_intermediate_size}"
-    )
+    ffn_width = student.config.expert_intermediate_sizes or student.config.expert_intermediate_size
+    print(f"Expert layers at depths {expert.expert_vlm_layers}, FFN width {ffn_width}")
     print(f"Expert params: teacher {t / 1e6:.1f}M, student {s / 1e6:.1f}M")
     print(f"Saved to {args.out}")
     if hf_repo:

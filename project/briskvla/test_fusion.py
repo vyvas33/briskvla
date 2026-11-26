@@ -13,6 +13,7 @@ from build_student import (
     LAYOUT_FUSION_GROUPS,
     build_student,
     compress,
+    compress_groups,
     download_teacher,
     fuse_ffns,
     make_groups,
@@ -62,15 +63,22 @@ def test_make_groups():
         make_groups(16, 3, "first")
 
 
-def test_layout_fusion_groups_cover_all_16_layers_with_same_parity():
+def test_layout_fusion_groups_cover_all_16_layers():
     for name in ("early", "spread", "late", "alternating"):
         groups = LAYOUT_FUSION_GROUPS[name]
         flat = sorted(idx for members, _ in groups for idx in members)
         assert flat == list(range(16))
         assert [kept for _, kept in groups] == resolve_layout(name)
-        if name in ("early", "spread", "late"):
+        if name == "early":
+            assert groups == [([2 * j, 2 * j + 1], j) for j in range(8)]
+        elif name in ("spread", "late"):
             for members, kept in groups:
                 assert all(idx % 2 == kept % 2 for idx in members)
+
+    partial = LAYOUT_FUSION_GROUPS["partial_fuse"]
+    assert [kept for _, kept in partial] == resolve_layout("partial_fuse") == [0, 1, 2, 3, 8, 11, 12, 15]
+    assert [len(m) for m, _ in partial] == [1, 1, 1, 1, 2, 2, 2, 2]
+    assert sorted(idx for members, _ in partial[4:] for idx in members) == list(range(8, 16))
 
 
 def test_fused_ffn_equals_parallel_ffns(teacher):
@@ -165,3 +173,29 @@ def test_save_and_reload(teacher, teacher_dir, shallow_ffn_fused, tmp_path):
     assert torch.equal(
         shallow_ffn_fused.model.sample_actions(**inputs), reloaded.model.sample_actions(**inputs)
     )
+
+
+@torch.no_grad()
+def test_partial_fuse_mixed_widths_and_reload(teacher, teacher_dir, tmp_path):
+    partial = compress_groups(teacher, LAYOUT_FUSION_GROUPS["partial_fuse"], ffn="fuse")
+    assert partial.config.expert_vlm_layers == [0, 1, 2, 3, 8, 11, 12, 15]
+    assert partial.config.expert_intermediate_size is None
+    assert partial.config.expert_intermediate_sizes == [2048, 2048, 2048, 2048, 4096, 4096, 4096, 4096]
+    expert_layers = partial.model.vlm_with_expert.lm_expert.layers
+    assert [layer.mlp.gate_proj.weight.shape[0] for layer in expert_layers] == [
+        2048,
+        2048,
+        2048,
+        2048,
+        4096,
+        4096,
+        4096,
+        4096,
+    ]
+
+    save_student(partial, teacher_dir, tmp_path)
+    reloaded = SmolVLAPolicy.from_pretrained(tmp_path)
+    assert reloaded.config.expert_intermediate_size is None
+    assert reloaded.config.expert_intermediate_sizes == [2048, 2048, 2048, 2048, 4096, 4096, 4096, 4096]
+    inputs = random_inputs(teacher)
+    assert torch.equal(partial.model.sample_actions(**inputs), reloaded.model.sample_actions(**inputs))

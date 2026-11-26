@@ -263,6 +263,8 @@ def build_model_card(
     layers = arch.get("expert_vlm_layers") or info.get("layers")
     num_layers = arch.get("num_expert_layers") or (len(layers) if isinstance(layers, list) else None)
     ffn_width = arch.get("expert_intermediate_size") or info.get("expert_intermediate_size")
+    ffn_widths = arch.get("expert_intermediate_sizes") or info.get("expert_intermediate_sizes")
+    ffn_display = ffn_widths or ffn_width or "default (2048)"
     layout = info.get("layout_canonical") or (
         layout_name_for_layers(layers) if isinstance(layers, list) else None
     )
@@ -276,7 +278,9 @@ def build_model_card(
         tags.append(f"{num_layers}L")
     if layout:
         tags.append(f"layout-{layout}")
-    if ffn_width and ffn_width > 2048:
+    if (ffn_width and ffn_width > 2048) or (
+        isinstance(ffn_widths, list) and any(w > 2048 for w in ffn_widths)
+    ):
         tags.append("ffn-fusion")
 
     lines = [
@@ -299,7 +303,7 @@ def build_model_card(
         f"| Teacher | `{TEACHER}` @ `{TEACHER_REVISION[:12]}` |",
         f"| Expert layers | `{num_layers}L` (`{layers}`) |",
         f"| Canonical layout | `{layout or 'custom'}` |",
-        f"| Expert FFN width | `{ffn_width or 'default (2048)'}` |",
+        f"| Expert FFN width | `{ffn_display}` |",
     ]
     if expert_params:
         lines.append(f"| Expert parameters | `{expert_params / 1e6:.2f}M` |")

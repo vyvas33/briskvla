@@ -556,6 +556,7 @@ class VLAFlowMatching(nn.Module):
             num_vlm_layers=self.config.num_vlm_layers,
             expert_vlm_layers=self.config.expert_vlm_layers,
             expert_intermediate_size=self.config.expert_intermediate_size,
+            expert_intermediate_sizes=self.config.expert_intermediate_sizes,
             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
             expert_width_multiplier=self.config.expert_width_multiplier,
             device=self.config.device if self.config.device is not None else "auto",

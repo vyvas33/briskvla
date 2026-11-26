@@ -83,6 +83,7 @@ class SmolVLMWithExpertModel(nn.Module):
         num_vlm_layers: int = -1,
         expert_vlm_layers: list[int] | None = None,
         expert_intermediate_size: int | None = None,
+        expert_intermediate_sizes: list[int] | None = None,
         self_attn_every_n_layers: int = -1,
         expert_width_multiplier: float = 0.5,
         device: str = "auto",
@@ -125,6 +126,21 @@ class SmolVLMWithExpertModel(nn.Module):
         )
         lm_expert_config.num_hidden_layers = len(self.expert_vlm_layers)
         self.lm_expert = AutoModel.from_config(lm_expert_config)
+        if expert_intermediate_sizes is not None:
+            if len(expert_intermediate_sizes) != len(self.lm_expert.layers):
+                raise ValueError(
+                    f"`expert_intermediate_sizes` length ({len(expert_intermediate_sizes)}) must match "
+                    f"number of expert layers ({len(self.lm_expert.layers)})."
+                )
+            for j, width in enumerate(expert_intermediate_sizes):
+                if width != lm_expert_config.intermediate_size:
+                    layer_cfg = copy.deepcopy(lm_expert_config)
+                    layer_cfg.intermediate_size = width
+                    mlp_cls = type(self.lm_expert.layers[j].mlp)
+                    ref_w = self.lm_expert.layers[j].mlp.gate_proj.weight
+                    self.lm_expert.layers[j].mlp = mlp_cls(layer_cfg).to(
+                        device=ref_w.device, dtype=ref_w.dtype
+                    )
 
         self.num_expert_layers = len(self.lm_expert.layers)
         # Set to a dict to record the expert hidden state after each expert layer, keyed by depth.

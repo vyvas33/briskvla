@@ -173,13 +173,31 @@ def _parse_model_meta(model: str, cfg: dict[str, Any] | None = None) -> dict[str
     if isinstance(vlm_layers, list):
         layout = layout_name_for_layers(vlm_layers) or ""
     if not layout:
-        for cand in ("spread", "early", "late", "alternating", "pairs", "first8", "last8", "alt", "alternate"):
+        for cand in (
+            "spread",
+            "early",
+            "late",
+            "alternating",
+            "partial_fuse",
+            "pairs",
+            "first8",
+            "last8",
+            "alt",
+            "alternate",
+        ):
             if re.search(rf"(?:^|_){cand}(?:_|$)", low):
                 layout = canonical_layout_name(cand)
                 break
 
     ffn_size = _to_int(cfg.get("expert_intermediate_size"))
-    ffn_fused = (ffn_size is not None and ffn_size > 2048) or ("ffn_fused" in low) or ("fuse" in low)
+    ffn_sizes = cfg.get("expert_intermediate_sizes")
+    has_wide_ffn = isinstance(ffn_sizes, list) and any((_to_int(w) or 0) > 2048 for w in ffn_sizes)
+    ffn_fused = (
+        (ffn_size is not None and ffn_size > 2048)
+        or has_wide_ffn
+        or ("ffn_fused" in low)
+        or ("fuse" in low)
+    )
 
     return {
         "role": role,

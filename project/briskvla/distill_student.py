@@ -412,6 +412,7 @@ def save_training_state(
     args,
     layers,
     expert_intermediate_size: int | None = None,
+    expert_intermediate_sizes: list[int] | None = None,
 ) -> None:
     torch.save(
         {
@@ -419,6 +420,7 @@ def save_training_state(
             "best": best,
             "layers": list(layers),
             "expert_intermediate_size": expert_intermediate_size,
+            "expert_intermediate_sizes": expert_intermediate_sizes,
             "args": {k: getattr(args, k) for k in RESUME_KEYS},
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
@@ -447,6 +449,14 @@ def load_training_state(resume_dir: Path, student, optimizer, scheduler, args, l
         mismatched["expert_intermediate_size"] = (
             state["expert_intermediate_size"],
             student.config.expert_intermediate_size,
+        )
+    if (
+        "expert_intermediate_sizes" in state
+        and state["expert_intermediate_sizes"] != student.config.expert_intermediate_sizes
+    ):
+        mismatched["expert_intermediate_sizes"] = (
+            state["expert_intermediate_sizes"],
+            student.config.expert_intermediate_sizes,
         )
     if mismatched:
         raise ValueError(
@@ -644,6 +654,7 @@ def main() -> None:
         "layers": layers,
         "hidden_pairs": pairs,
         "expert_intermediate_size": student.config.expert_intermediate_size,
+        "expert_intermediate_sizes": student.config.expert_intermediate_sizes,
         "num_expert_layers": len(layers),
         "student_num_steps": student_num_steps,
         "teacher_dir": str(teacher_dir),
@@ -707,6 +718,7 @@ def main() -> None:
                 args,
                 layers,
                 expert_intermediate_size=student.config.expert_intermediate_size,
+                expert_intermediate_sizes=student.config.expert_intermediate_sizes,
             )
 
         save_atomic(args.out / "last", write_last)

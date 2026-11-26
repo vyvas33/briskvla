@@ -101,6 +101,8 @@ class SmolVLAConfig(PreTrainedConfig):
     # Hidden width of every expert FFN. None keeps the default derived from the expert hidden size.
     # Set by BriskVLA students that fuse several teacher FFNs into one wider FFN.
     expert_intermediate_size: int | None = None
+    # Optional per-layer expert FFN widths (used when only a subset of expert layers use FFN fusion).
+    expert_intermediate_sizes: list[int] | None = None
     self_attn_every_n_layers: int = 2  # Interleave SA layers each self_attn_every_n_layers
     expert_width_multiplier: float = 0.75  # The action expert hidden size (wrt to the VLM)
 
@@ -145,6 +147,21 @@ class SmolVLAConfig(PreTrainedConfig):
 
         if self.expert_intermediate_size is not None and self.expert_intermediate_size <= 0:
             raise ValueError(f"`expert_intermediate_size` must be positive. Got {self.expert_intermediate_size}.")
+        if self.expert_intermediate_sizes is not None:
+            if self.expert_intermediate_size is not None:
+                raise ValueError("Set either `expert_intermediate_size` or `expert_intermediate_sizes`, not both.")
+            if len(self.expert_intermediate_sizes) == 0 or any(w <= 0 for w in self.expert_intermediate_sizes):
+                raise ValueError(
+                    "`expert_intermediate_sizes` must be a non-empty list of positive ints. "
+                    f"Got {self.expert_intermediate_sizes}."
+                )
+            if self.expert_vlm_layers is not None and len(self.expert_intermediate_sizes) != len(
+                self.expert_vlm_layers
+            ):
+                raise ValueError(
+                    f"`expert_intermediate_sizes` length ({len(self.expert_intermediate_sizes)}) must match "
+                    f"`expert_vlm_layers` length ({len(self.expert_vlm_layers)})."
+                )
 
     def validate_features(self) -> None:
         if self.input_features is None:

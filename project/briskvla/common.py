@@ -45,6 +45,7 @@ LAYOUTS: dict[str, list[int]] = {
 }
 EXTRA_LAYOUTS: dict[str, list[int]] = {
     "alternating": [0, 3, 4, 7, 8, 11, 12, 15],
+    "partial_fuse": [0, 1, 2, 3, 8, 11, 12, 15],
 }
 LEGACY_LAYOUT_ALIASES: dict[str, str] = {
     "pairs": "spread",
@@ -188,5 +189,6 @@ def read_policy_arch(policy_dir: str | Path) -> dict[str, Any]:
         "expert_vlm_layers": layers,
         "num_expert_layers": num_expert,
         "expert_intermediate_size": cfg.get("expert_intermediate_size"),
+        "expert_intermediate_sizes": cfg.get("expert_intermediate_sizes"),
         "num_vlm_layers": num_vlm,
     }
