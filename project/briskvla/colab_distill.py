@@ -222,6 +222,7 @@ def build(name: str) -> Path:
             *STUDENTS[name].split(),
             "--out",
             str(folder),
+            "--no_hf_push",
         ]
         print("build:", " ".join(cmd), flush=True)
         subprocess.run(cmd, cwd=REPO, check=True)

@@ -9,7 +9,16 @@ Downloads the teacher on first run. Uses random inputs, so no dataset is needed.
 import pytest
 import torch
 import torch.nn.functional as F  # noqa: N812
-from build_student import build_student, compress, download_teacher, fuse_ffns, make_groups, save_student
+from build_student import (
+    LAYOUT_FUSION_GROUPS,
+    build_student,
+    compress,
+    download_teacher,
+    fuse_ffns,
+    make_groups,
+    save_student,
+)
+from common import resolve_layout
 from test_student import random_inputs
 
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
@@ -51,6 +60,17 @@ def test_make_groups():
     assert [kept for _, kept in make_groups(16, 4, "last")] == [3, 7, 11, 15]
     with pytest.raises(ValueError):
         make_groups(16, 3, "first")
+
+
+def test_layout_fusion_groups_cover_all_16_layers_with_same_parity():
+    for name in ("early", "spread", "late", "alternating"):
+        groups = LAYOUT_FUSION_GROUPS[name]
+        flat = sorted(idx for members, _ in groups for idx in members)
+        assert flat == list(range(16))
+        assert [kept for _, kept in groups] == resolve_layout(name)
+        if name in ("early", "spread", "late"):
+            for members, kept in groups:
+                assert all(idx % 2 == kept % 2 for idx in members)
 
 
 def test_fused_ffn_equals_parallel_ffns(teacher):
