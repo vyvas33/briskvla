@@ -33,8 +33,17 @@ from pathlib import Path
 REPO = Path("/content/briskvla")
 REPO_URL = "https://github.com/vyvas33/briskvla.git"
 BRANCH = os.environ.get("BRISKVLA_BRANCH", "briskvla")
+HF_NAMESPACE = os.environ.get("BRISKVLA_HF_NAMESPACE", "").strip()
+HF_PREFIX = os.environ.get("BRISKVLA_HF_PREFIX", "").strip()
+HF_PRIVATE = os.environ.get("HF_PRIVATE", "0") == "1"
 DRIVE = Path(os.environ.get("BRISKVLA_DRIVE", "/content/drive/MyDrive/briskvla"))
-OUT = Path(os.environ.get("DISTILL_OUT", str(DRIVE / "distill")))
+MOUNT_POINT = Path("/content/drive/MyDrive")
+DEFAULT_OUT = (
+    "/content/briskvla_local/distill"
+    if HF_NAMESPACE and not os.environ.get("BRISKVLA_DRIVE") and not MOUNT_POINT.is_dir()
+    else str(DRIVE / "distill")
+)
+OUT = Path(os.environ.get("DISTILL_OUT", DEFAULT_OUT))
 
 LAYOUTS = [x.strip() for x in os.environ.get("DISTILL_LAYOUTS", "spread,early,late").split(",") if x.strip()]
 STUDENTS = dict(
@@ -59,7 +68,6 @@ if WANDB_MODE == "online" and not os.environ.get("WANDB_API_KEY") and not (Path.
     raise SystemExit("WANDB_API_KEY must be set in the environment (or set WANDB_MODE=offline).")
 
 RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "").strip()
-MOUNT_POINT = Path("/content/drive/MyDrive")
 if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode != 0:
     rclone_conf = Path(os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
     if not rclone_conf.is_file():
@@ -93,10 +101,12 @@ if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).retu
     else:
         raise SystemExit(f"Timed out waiting for rclone mount of {RCLONE_REMOTE}: at {MOUNT_POINT}")
 
-if not MOUNT_POINT.is_dir():
+needs_drive = str(OUT).startswith("/content/drive/")
+if needs_drive and not MOUNT_POINT.is_dir():
     raise SystemExit(
-        "Google Drive is not mounted. Run `colab drivemount -s <session>` or "
-        "`project/briskvla/colab_multi.sh mount <acct> <session>` first."
+        "Google Drive is not mounted. Run `colab drivemount -s <session>`, "
+        "`project/briskvla/colab_multi.sh mount <acct> <session>`, or set BRISKVLA_HF_NAMESPACE "
+        "to train on local SSD and push finished models directly to Hugging Face Hub."
     )
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -119,6 +129,8 @@ if not SKIP_SETUP:
     sh("uv sync --locked --inexact --python 3.12 --extra briskvla", cwd=REPO)
 
 sh("uv run --no-sync python project/briskvla/wandb_log.py check-auth", cwd=REPO)
+if HF_NAMESPACE:
+    sh(f"uv run --no-sync python project/briskvla/hf_hub.py check-auth --namespace {HF_NAMESPACE}", cwd=REPO)
 
 WANDB_ARGS = [
     "--wandb_project",
@@ -128,6 +140,11 @@ WANDB_ARGS = [
     *(["--wandb_mode", WANDB_MODE] if WANDB_MODE in ("online", "offline") else []),
     *(["--wandb_group", WANDB_GROUP] if WANDB_GROUP else []),
     *(["--wandb_tags", WANDB_TAGS] if WANDB_TAGS else []),
+]
+HF_ARGS = [
+    *(["--hf_namespace", HF_NAMESPACE] if HF_NAMESPACE else []),
+    *(["--hf_prefix", HF_PREFIX] if HF_PREFIX else []),
+    *(["--hf_private"] if HF_PRIVATE else []),
 ]
 
 
@@ -232,6 +249,7 @@ for entry, out_name in RUN_MAP:
         NUM_WORKERS,
         *ARGS,
         *WANDB_ARGS,
+        *HF_ARGS,
     ]
     print("start:", " ".join(cmd), flush=True)
     with open(OUT / f"{out_name}.log", "a") as log:

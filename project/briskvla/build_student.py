@@ -28,6 +28,14 @@ from pathlib import Path
 
 import torch
 from common import ALL_LAYOUT_CHOICES, TEACHER, TEACHER_REVISION, resolve_layout
+from hf_hub import (
+    add_hf_upload_args,
+    ensure_hf_write_auth,
+    resolve_hf_settings,
+    resolve_policy_path,
+    resolve_target_repo,
+    upload_model,
+)
 from huggingface_hub import snapshot_download
 
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
@@ -210,11 +218,17 @@ def main() -> None:
     parser.add_argument("--revision", default=TEACHER_REVISION, help="Hub revision of the teacher")
     parser.add_argument(
         "--source",
-        type=Path,
+        type=str,
         default=None,
-        help="With --group: student folder to merge (default: the teacher)",
+        help="With --group: local checkpoint dir or HF repo id ('owner/repo[@rev]') to merge (default: teacher)",
     )
+    add_hf_upload_args(parser)
     args = parser.parse_args()
+
+    hf = resolve_hf_settings(args)
+    hf_repo = resolve_target_repo(args.out.name, repo=hf["repo"], namespace=hf["namespace"], prefix=hf["prefix"])
+    if hf_repo:
+        ensure_hf_write_auth(hf_repo.split("/", 1)[0])
 
     teacher_dir = download_teacher(args.teacher, args.revision)
     teacher = SmolVLAPolicy.from_pretrained(teacher_dir)
@@ -222,7 +236,8 @@ def main() -> None:
         layers = resolve_layout(args.layout) if args.layout else [int(x) for x in args.layers.split(",")]
         student = build_student(teacher, layers)
     else:
-        source = SmolVLAPolicy.from_pretrained(args.source) if args.source else teacher
+        source_path = resolve_policy_path(args.source) if args.source else None
+        source = SmolVLAPolicy.from_pretrained(source_path) if source_path else teacher
         student = compress(source, args.group, args.keep, args.ffn)
     save_student(student, teacher_dir, args.out)
 
@@ -234,6 +249,9 @@ def main() -> None:
     )
     print(f"Expert params: teacher {t / 1e6:.1f}M, student {s / 1e6:.1f}M")
     print(f"Saved to {args.out}")
+    if hf_repo:
+        url = upload_model(args.out, hf_repo, private=hf["private"])
+        print(f"Uploaded to Hugging Face Hub: {url}")
 
 
 if __name__ == "__main__":

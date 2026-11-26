@@ -45,7 +45,13 @@ REPO = Path("/content/briskvla")
 REPO_URL = "https://github.com/vyvas33/briskvla.git"
 BRANCH = os.environ.get("BRISKVLA_BRANCH", "briskvla")
 DRIVE = Path(os.environ.get("BRISKVLA_DRIVE", "/content/drive/MyDrive/briskvla"))
-OUT = Path(os.environ.get("EVAL_OUT", str(DRIVE / "outputs")))
+MOUNT_POINT = Path("/content/drive/MyDrive")
+DEFAULT_OUT = (
+    str(DRIVE / "outputs")
+    if os.environ.get("BRISKVLA_DRIVE") or MOUNT_POINT.is_dir() or os.environ.get("RCLONE_REMOTE")
+    else "/content/briskvla_local/outputs"
+)
+OUT = Path(os.environ.get("EVAL_OUT", DEFAULT_OUT))
 
 RAW_MODELS = os.environ.get("EVAL_MODELS", "")
 MODELS = dict(entry.split("=", 1) for entry in RAW_MODELS.split(";") if entry.strip())
@@ -67,7 +73,6 @@ if WANDB_MODE == "online" and not os.environ.get("WANDB_API_KEY") and not (Path.
     raise SystemExit("WANDB_API_KEY must be set in the environment (or set WANDB_MODE=offline).")
 
 RCLONE_REMOTE = os.environ.get("RCLONE_REMOTE", "").strip()
-MOUNT_POINT = Path("/content/drive/MyDrive")
 if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).returncode != 0:
     rclone_conf = Path(os.environ.get("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"))
     if not rclone_conf.is_file():
@@ -101,16 +106,31 @@ if RCLONE_REMOTE and subprocess.run(["mountpoint", "-q", str(MOUNT_POINT)]).retu
     else:
         raise SystemExit(f"Timed out waiting for rclone mount of {RCLONE_REMOTE}: at {MOUNT_POINT}")
 
-if not MOUNT_POINT.is_dir():
+needs_drive = str(OUT).startswith("/content/drive/") or any(
+    p.startswith("/content/drive/") for p in MODELS.values()
+)
+if needs_drive and not MOUNT_POINT.is_dir():
     raise SystemExit(
-        "Google Drive is not mounted. Run `colab drivemount -s <session>` or "
-        "`project/briskvla/colab_multi.sh mount <acct> <session>` first."
+        "Google Drive is not mounted. Run `colab drivemount -s <session>`, "
+        "`project/briskvla/colab_multi.sh mount <acct> <session>`, or use HF repo IDs in EVAL_MODELS."
     )
+
+
+def _is_hf_repo_spec(policy: str) -> bool:
+    return (
+        not policy.startswith(("/", ".", "~"))
+        and "\\" not in policy
+        and "/" in policy
+        and len(policy.split("@", 1)[0].split("/")) == 2
+    )
+
 
 missing = [
     f"{name}={policy}"
     for name, policy in MODELS.items()
-    if policy != "teacher" and not (Path(policy) / "model.safetensors").is_file()
+    if policy != "teacher"
+    and not _is_hf_repo_spec(policy)
+    and not (Path(policy) / "model.safetensors").is_file()
 ]
 if missing:
     raise SystemExit(f"Missing model.safetensors for: {missing}")

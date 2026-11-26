@@ -30,6 +30,7 @@ from pathlib import Path
 
 import torch
 from common import TEACHER, TEACHER_REVISION, cpu_name, git_info, gpu_state
+from hf_hub import is_hf_repo_spec, parse_hf_spec
 from torch.utils.flop_counter import FlopCounterMode
 from wandb_log import add_wandb_args, ensure_wandb_auth, log_latency_file, resolve_wandb_settings
 
@@ -39,11 +40,16 @@ from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TO
 
 
 def load_policy(path: str, device: str) -> SmolVLAPolicy:
-    revision = TEACHER_REVISION if path == TEACHER else None
-    config = PreTrainedConfig.from_pretrained(path, revision=revision)
+    if path in ("teacher", TEACHER):
+        repo_or_path, revision = TEACHER, TEACHER_REVISION
+    elif is_hf_repo_spec(path):
+        repo_or_path, revision = parse_hf_spec(path)
+    else:
+        repo_or_path, revision = path, None
+    config = PreTrainedConfig.from_pretrained(repo_or_path, revision=revision)
     config.device = device
     config.empty_cameras = 1
-    policy = SmolVLAPolicy.from_pretrained(path, config=config, revision=revision)
+    policy = SmolVLAPolicy.from_pretrained(repo_or_path, config=config, revision=revision)
     policy.eval()
     return policy
 

@@ -5,7 +5,7 @@
 #   project/briskvla/run_eval.sh NAME POLICY
 #
 #   NAME    model run name, e.g. teacher, student_8L_spread, student_8L_alternating_ffn_fused, shallow_8L_early
-#   POLICY  "teacher" for lerobot/smolvla_libero at the evaluated revision, or a checkpoint folder
+#   POLICY  "teacher", a local checkpoint folder, or a Hugging Face repo id (owner/repo[@rev])
 #
 # Settings are environment variables. Defaults:
 #   STEPS="10 3"          denoising steps to evaluate
@@ -108,8 +108,11 @@ if [[ "$POLICY" == teacher ]]; then
   if [[ ! -f "$POLICY_DIR/model.safetensors" ]]; then
     uv run --no-sync hf download "$TEACHER" --revision "$TEACHER_REVISION" --local-dir "$POLICY_DIR"
   fi
-else
+elif [[ -d "$POLICY" ]]; then
   POLICY_DIR=$POLICY
+else
+  # Support Hugging Face repo IDs (owner/repo or owner/repo@rev) transparently.
+  POLICY_DIR=$(uv run --no-sync python project/briskvla/hf_hub.py resolve "$POLICY")
 fi
 if [[ ! -f "$POLICY_DIR/model.safetensors" ]]; then
   echo "No model.safetensors in $POLICY_DIR" >&2
