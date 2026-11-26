@@ -64,11 +64,11 @@ LIBERO success rate (%), 100 episodes per suite, seed 1000, `n_action_steps=10`.
 |---|---|---|---|---|---|---|---|
 | Teacher (`16L`, 98.2M expert) | — | 10 | 79 | 91 | 89 | 69 | **82.0** |
 | Teacher (`16L`, 98.2M expert) | — | 3 | 76 | 90 | 89 | 71 | **81.5** |
-| **Student — 8L Early** (distilled)† | `same_depth` | 10 | 77.3 | 86.3 | 83.0 | 66.3 | **78.3** |
-| **Student — 8L Spread** (distilled)† | `same_depth` | 10 | 75.3 | 82.7 | 85.0 | 70.0 | **78.3** |
+| **Student — 8L Early** (distilled) | `same_depth` | 10 | 77.3 | 86.3 | 83.0 | 66.3 | **78.3** |
+| **Student — 8L Spread** (distilled) | `same_depth` | 10 | 75.3 | 82.7 | 85.0 | 70.0 | **78.3** |
 | **Student — 8L Late** (distilled) | `same_depth` | 10 | 67 | 82 | 78 | 56 | 70.8 |
-| **Shallow — 8L Early** (no distillation)† | — | 10 | 73.7 | 86.3 | 74.7 | 67.3 | 75.5 |
-| **Shallow — 8L Spread** (no distillation)† | — | 10 | 63.0 | 80.3 | 79.3 | 64.0 | 71.7 |
+| **Shallow — 8L Early** (no distillation) | — | 10 | 73.7 | 86.3 | 74.7 | 67.3 | 75.5 |
+| **Shallow — 8L Spread** (no distillation) | — | 10 | 63.0 | 80.3 | 79.3 | 64.0 | 71.7 |
 | **Shallow — 8L Late** (no distillation) | — | 10 | 63 | 66 | 75 | 48 | 63.0 |
 | **Student — 8L Alternating + FFN Fusion** (84.5M) | `uniform` | 10 | 76 | 83 | 85 | 61 | **76.3** |
 | **Student — 8L Alternating** (49.1M drop control) | `uniform` | 10 | 70 | 81 | 82 | 52 | 71.3 |
@@ -84,5 +84,3 @@ LIBERO success rate (%), 100 episodes per suite, seed 1000, `n_action_steps=10`.
 | **Student — 8L Spread** (49.1M) | `uniform` | 3 | 51 | 72 | 66 | 42 | 57.8 |
 
 The 95% confidence interval for a single 100-episode cell is roughly ±8–9 percentage points (about ±4–4.5 points for the 400-episode average).
-
-† 300 episodes per suite: the 100-episode run above (init states 0–9 per task, Colab, batch 5) pooled with a 200-episode run (`EPISODES=20`, init states 0–19, RTX 5070 Laptop with CPU rendering, batch 2), both with `seed=1000`. Each cell is ±4–5.5 points, each average about ±2.5. The 200-episode run alone: Student Spread 78.5, Student Early 78.2, Shallow Early 75.4, Shallow Spread 71.5 (per suite in [project/briskvla/README.md](project/briskvla/README.md#results)).
