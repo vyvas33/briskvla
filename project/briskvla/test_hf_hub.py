@@ -54,7 +54,7 @@ def test_resolve_hf_settings_and_target_repo(monkeypatch: pytest.MonkeyPatch):
         hf_hub.resolve_target_repo(
             "shallow_8L_alternating", repo=cfg["repo"], namespace=cfg["namespace"], prefix=cfg["prefix"]
         )
-        is None
+        == "briskVLA/shallow_8L_alternating"
     )
 
     monkeypatch.setenv(hf_hub.HF_NAMESPACE_ENV, "briskvla-team")

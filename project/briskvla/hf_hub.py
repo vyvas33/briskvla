@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from common import (
+    DEFAULT_HF_NAMESPACE,
     DEFAULT_WANDB_ENTITY,
     DEFAULT_WANDB_PROJECT,
     TEACHER,
@@ -87,7 +88,10 @@ def format_hf_repo_id(namespace: str, model_name: str, prefix: str = "") -> str:
 def resolve_hf_settings(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve HF Hub upload settings from CLI args and environment variables."""
     repo = getattr(args, "hf_repo", None) or None
-    namespace = getattr(args, "hf_namespace", None) or os.environ.get(HF_NAMESPACE_ENV) or None
+    env_ns = os.environ.get(HF_NAMESPACE_ENV)
+    namespace = getattr(args, "hf_namespace", None)
+    if namespace is None:
+        namespace = DEFAULT_HF_NAMESPACE if env_ns is None else (env_ns.strip() or None)
     prefix = getattr(args, "hf_prefix", None)
     if prefix is None:
         prefix = os.environ.get(HF_PREFIX_ENV, "")
