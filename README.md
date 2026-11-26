@@ -43,8 +43,24 @@ Every model and run name makes its training method, expert depth, layer placemen
 | `<modification>` | Optional structural change (omitted for plain drop) | `ffn_fused` (merged pair FFNs stacked in parallel) |
 | `<variant>` | Optional training/eval qualifier | `untrained` · `shallow_pi` (teacher velocity/hidden + GT, no output loss) · `steps3` |
 
-Canonical examples: `teacher`, `student_8L_spread`, `student_8L_early`, `student_8L_late`, `student_8L_alternating`, `student_8L_alternating_ffn_fused`, `shallow_8L_spread`, `shallow_8L_early`, `shallow_8L_late`, `shallow_8L_spread_untrained`.
 Legacy CLI layout aliases (`pairs`, `first8`, `last8`, `alt`, `alternate`) are still accepted by `--layout`.
+
+### Model Registry
+
+| Canonical Name | Role | Depth / Params | VLM Depths (`expert_vlm_layers`) | FFN Width | Status |
+|---|---|---|---|---|---|
+| `teacher` | Teacher | `16L` (98.2M) | `0..15` | 2048 | Evaluated (`K=10, 3`) |
+| `student_8L_spread` | Distilled | `8L` (49.1M) | `0,1,4,5,8,9,12,13` | 2048 | Evaluated (`K=10, 3, 1`) |
+| `student_8L_early` | Distilled | `8L` (49.1M) | `0,1,2,3,4,5,6,7` | 2048 | Evaluated (`K=10, 3, 1`) |
+| `student_8L_late` | Distilled | `8L` (49.1M) | `8,9,10,11,12,13,14,15` | 2048 | Evaluated (`K=10, 3, 1`) |
+| `shallow_8L_spread` / `early` / `late` | Shallow (GT-only) | `8L` (49.1M) | same as above | 2048 | Evaluated (`K=10, 3, 1`) |
+| `student_8L_spread` / `early` / `late` `_shallow_pi` | Distilled (+GT, no output) | `8L` (49.1M) | same as above | 2048 | Spatial only (`K=10, 3, 1`) |
+| `student_8L_alternating` | Distilled (drop control) | `8L` (49.1M) | `0,3,4,7,8,11,12,15` | 2048 | Evaluated (`K=10, 3` only; `uniform`) |
+| `student_8L_alternating_ffn_fused` | Distilled + FFN Fusion | `8L` (84.5M) | `0,3,4,7,8,11,12,15` | 4096 | Evaluated (`K=10, 3` only; `uniform`) |
+| **`shallow_8L_alternating`** | Shallow (GT-only drop control) | `8L` (49.1M) | `0,3,4,7,8,11,12,15` | 2048 | **Not yet trained/evaluated** |
+| **`shallow_8L_alternating_ffn_fused`** | Shallow (GT-only) + FFN Fusion | `8L` (84.5M) | `0,3,4,7,8,11,12,15` | 4096 | **Not yet trained/evaluated** |
+| `shallow_8L_<placement>[_ffn_fused]_untrained` | Untrained | `8L` | any above | 2048 / 4096 | Zero-shot baselines |
+| `student_4L_alternating_ffn_fused` / `shallow_4L_alternating_ffn_fused` | 4-layer iterative fusion (`16→8→4`) | `4L` | `0,7,8,15` | 8192 | Supported by `--source`, not yet trained |
 
 ## Quick Eval
 
