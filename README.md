@@ -65,15 +65,15 @@ LIBERO success rate (%), 100 episodes per suite, seed 1000, `n_action_steps=10`.
 <tr><td rowspan="2"><code>teacher</code></td><td rowspan="2">Teacher</td><td rowspan="2"><code>16L</code> (98.2M)</td><td rowspan="2"><code>0..15</code></td><td rowspan="2">2048</td><td rowspan="2">—</td><td>10</td><td>79</td><td>91</td><td>89</td><td>69</td><td><b>82.0</b></td></tr>
 <tr><td>3</td><td>76</td><td>90</td><td>89</td><td>71</td><td><b>81.5</b></td></tr>
 <tr><td rowspan="2"><code>student_8L_early</code></td><td rowspan="2">Distilled</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,2,3,4,5,6,7</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>77.3</td><td>86.3</td><td>83.0</td><td>66.3</td><td><b>78.3</b></td></tr>
-<tr><td>3</td><td>68</td><td>42</td><td>52</td><td>52</td><td>53.5</td></tr>
+<tr><td>3</td><td>69.0</td><td>45.7</td><td>52.0</td><td>49.0</td><td>53.9</td></tr>
 <tr><td rowspan="2"><code>student_8L_spread</code></td><td rowspan="2">Distilled</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,4,5,8,9,12,13</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>75.3</td><td>82.7</td><td>85.0</td><td>70.0</td><td><b>78.3</b></td></tr>
-<tr><td>3</td><td>55</td><td>64</td><td>71</td><td>49</td><td>59.8</td></tr>
+<tr><td>3</td><td>53.7</td><td>63.7</td><td>69.3</td><td>49.0</td><td>58.9</td></tr>
 <tr><td rowspan="2"><code>student_8L_late</code></td><td rowspan="2">Distilled</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>8,9,10,11,12,13,14,15</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>67</td><td>82</td><td>78</td><td>56</td><td>70.8</td></tr>
 <tr><td>3</td><td>53</td><td>66</td><td>69</td><td>45</td><td>58.3</td></tr>
 <tr><td rowspan="2"><code>shallow_8L_early</code></td><td rowspan="2">Shallow (GT-only)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,2,3,4,5,6,7</code></td><td rowspan="2">2048</td><td rowspan="2">—</td><td>10</td><td>73.7</td><td>86.3</td><td>74.7</td><td>67.3</td><td>75.5</td></tr>
-<tr><td>3</td><td>85</td><td>79</td><td>78</td><td>74</td><td><b>79.0</b></td></tr>
+<tr><td>3</td><td>81.0</td><td>85.3</td><td>75.3</td><td>73.0</td><td><b>78.7</b></td></tr>
 <tr><td rowspan="2"><code>shallow_8L_spread</code></td><td rowspan="2">Shallow (GT-only)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,4,5,8,9,12,13</code></td><td rowspan="2">2048</td><td rowspan="2">—</td><td>10</td><td>63.0</td><td>80.3</td><td>79.3</td><td>64.0</td><td>71.7</td></tr>
-<tr><td>3</td><td>66</td><td>84</td><td>77</td><td>71</td><td>74.5</td></tr>
+<tr><td>3</td><td>68.7</td><td>86.0</td><td>77.3</td><td>68.3</td><td>75.1</td></tr>
 <tr><td rowspan="2"><code>shallow_8L_late</code></td><td rowspan="2">Shallow (GT-only)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>8,9,10,11,12,13,14,15</code></td><td rowspan="2">2048</td><td rowspan="2">—</td><td>10</td><td>63</td><td>66</td><td>75</td><td>48</td><td>63.0</td></tr>
 <tr><td>3</td><td>56</td><td>71</td><td>77</td><td>47</td><td>62.8</td></tr>
 <tr><td rowspan="2"><code>student_8L_early_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,2,3,4,5,6,7</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>67</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>

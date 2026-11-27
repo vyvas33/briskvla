@@ -279,11 +279,11 @@ Every trained model has 8 expert layers (`8L`), trained for 5000 steps at batch 
 | Shallow — 8L Spread (no KD) | 10 | 63.0 | 80.3 | 79.3 | 64.0 | 71.7 |
 | Shallow — 8L Late (no KD) | 10 | 63 | 66 | 75 | 48 | 63.0 |
 | Teacher (`16L`, 98.2M) | 3 | 76 | 90 | 89 | 71 | **81.5** |
-| Student — 8L Early (distilled) | 3 | 68 | 42 | 52 | 52 | 53.5 |
-| Student — 8L Spread (distilled) | 3 | 55 | 64 | 71 | 49 | 59.8 |
+| Student — 8L Early (distilled) | 3 | 69.0 | 45.7 | 52.0 | 49.0 | 53.9 |
+| Student — 8L Spread (distilled) | 3 | 53.7 | 63.7 | 69.3 | 49.0 | 58.9 |
 | Student — 8L Late (distilled) | 3 | 53 | 66 | 69 | 45 | 58.3 |
-| Shallow — 8L Early (no KD) | 3 | 85 | 79 | 78 | 74 | **79.0** |
-| Shallow — 8L Spread (no KD) | 3 | 66 | 84 | 77 | 71 | 74.5 |
+| Shallow — 8L Early (no KD) | 3 | 81.0 | 85.3 | 75.3 | 73.0 | **78.7** |
+| Shallow — 8L Spread (no KD) | 3 | 68.7 | 86.0 | 77.3 | 68.3 | 75.1 |
 | Shallow — 8L Late (no KD) | 3 | 56 | 71 | 77 | 47 | 62.8 |
 | Student — 8L Early (distilled) | 1 | 88 | 73 | 73 | 59 | 73.2 |
 | Student — 8L Spread (distilled) | 1 | 70 | 74 | 78 | 57 | 69.8 |
