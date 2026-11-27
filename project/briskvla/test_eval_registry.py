@@ -182,3 +182,90 @@ def test_build_coverage_matrix_identifies_missing_jobs():
     assert ("teacher", "teacher", 1) in missing
     assert ("shallow_8L_alternating", "briskVLA/shallow_8L_alternating", 3) in missing
     assert ("shallow_8L_alternating", "briskVLA/shallow_8L_alternating", 1) in missing
+
+
+def test_build_coverage_matrix_excludes_missing_late_and_partial_benchmark_rows():
+    rows = eval_registry.merge_rows(
+        [],
+        [
+            {
+                "model": "shallow_8L_late",
+                "num_steps": 10,
+                "episodes_per_task": 10,
+                "avg": 63.0,
+                "suites_completed": 4,
+                "status": "complete",
+                "source": "readme",
+            },
+            {
+                "model": "bt_libero_10_b4",
+                "num_steps": 10,
+                "episodes_per_task": 4,
+                "avg": 77.5,
+                "suites_completed": 1,
+                "status": "partial",
+                "source": "local",
+            },
+        ],
+    )
+    matrix, missing = eval_registry.build_coverage_matrix(
+        rows,
+        steps_list=[10, 3, 1],
+        episodes=10,
+        hf_models=[
+            "briskVLA/shallow_8L_late",
+            "briskVLA/shallow_8L_late_untrained",
+            "briskVLA/student_8L_late_shallow_pi",
+            "briskVLA/shallow_8L_early_ffn_fused",
+        ],
+    )
+    models = {m["model"] for m in matrix}
+    missing_models = {m for m, _, _ in missing}
+    assert "shallow_8L_late" in models
+    assert "shallow_8L_early_ffn_fused" in models
+    assert "shallow_8L_late_untrained" not in models
+    assert "student_8L_late_shallow_pi" not in models
+    assert "bt_libero_10_b4" not in models
+    assert "shallow_8L_late_untrained" not in missing_models
+    assert "student_8L_late_shallow_pi" not in missing_models
+
+
+def test_partial_eval_avg_divides_by_all_four_suites():
+    partial_one = eval_registry.normalize_row(
+        {
+            "model": "bt_libero_spatial_b2",
+            "num_steps": 10,
+            "spatial": 80.0,
+            "avg": 80.0,
+            "suites_completed": 1,
+            "status": "partial",
+        }
+    )
+    partial_three = eval_registry.normalize_row(
+        {
+            "model": "student_8L_early_shallow_pi",
+            "num_steps": 3,
+            "object": 90.0,
+            "goal": 77.0,
+            "long": 69.0,
+            "avg": 78.67,
+            "suites_completed": 3,
+            "status": "partial",
+        }
+    )
+    complete_four = eval_registry.normalize_row(
+        {
+            "model": "shallow_8L_early",
+            "num_steps": 10,
+            "spatial": 75.0,
+            "object": 87.0,
+            "goal": 74.0,
+            "long": 67.0,
+            "avg": 75.8,
+            "suites_completed": 4,
+            "status": "complete",
+        }
+    )
+    assert partial_one["avg"] == "20"
+    assert partial_three["avg"] == "59"
+    assert complete_four["avg"] == "75.8"

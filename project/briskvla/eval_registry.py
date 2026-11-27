@@ -221,6 +221,14 @@ def normalize_row(raw: dict[str, Any]) -> dict[str, str]:
     for score_col in ("spatial", "object", "goal", "long", "avg"):
         row[score_col] = _fmt_num(row[score_col], digits=2)
 
+    present_scores = [v for col in ("spatial", "object", "goal", "long") if (v := _to_float(row[col])) is not None]
+    completed = _to_int(row["suites_completed"])
+    if completed is None and present_scores:
+        completed = len(present_scores)
+        row["suites_completed"] = str(completed)
+    if present_scores and (completed or 0) < len(SUITES):
+        row["avg"] = _fmt_num(sum(present_scores) / len(SUITES), digits=2)
+
     if row["wandb_run_id"] and not row["wandb_url"]:
         row["wandb_url"] = wandb_url(row["wandb_run_id"])
     if not row["status"]:
@@ -409,10 +417,8 @@ def parse_wandb_eval_run(
     if completed is None:
         completed = sum(1 for v in scores.values() if v is not None)
     avg = summary.get("eval/avg_success")
-    if avg is None and completed == len(SUITES):
-        avg = sum(float(scores[k]) for k in ("spatial", "object", "goal", "long")) / len(SUITES)
-    elif avg is None:
-        avg = summary.get("eval/mean_completed_success")
+    if avg is None and completed > 0:
+        avg = sum(float(v) for v in scores.values() if v is not None) / len(SUITES)
 
     user_obj = getattr(run, "user", None)
     evaluator = str(getattr(user_obj, "username", None) or cfg.get("host") or "")
@@ -604,7 +610,7 @@ def record_local_eval_dir(
         raise ValueError(f"No suite eval_info.json files found in {run_dir}")
 
     done_vals = [v for v in scores.values() if v is not None]
-    avg = sum(done_vals) / len(done_vals) if done_vals else None
+    avg = sum(done_vals) / len(SUITES) if done_vals else None
 
     wb_file = run_dir / "wandb_id.txt"
     wb_id = wb_file.read_text(encoding="utf-8").strip() if wb_file.is_file() else ""
@@ -679,6 +685,7 @@ def build_coverage_matrix(
     steps_list: list[int],
     episodes: int = 10,
     hf_models: list[str] | None = None,
+    exclude_missing_layouts: tuple[str, ...] = ("late",),
 ) -> tuple[list[dict[str, str]], list[tuple[str, str, int]]]:
     """Build coverage rows across ``teacher``, HF models, and registry models, plus missing jobs."""
     policy_by_model: dict[str, str] = {"teacher": "teacher"}
@@ -686,7 +693,14 @@ def build_coverage_matrix(
         short = repo.split("/", 1)[-1]
         policy_by_model[short] = repo
 
-    all_models = set(policy_by_model) | {r["model"] for r in rows if r.get("model")}
+    registry_models = {
+        r["model"]
+        for r in rows
+        if r.get("model")
+        and r.get("status") == "complete"
+        and _to_int(r.get("episodes_per_task"), 10) == episodes
+    }
+    all_models = set(policy_by_model) | registry_models
     ordered_models = sorted(all_models, key=lambda m: (0 if m == "teacher" else 1 if m in policy_by_model else 2, m))
 
     matrix: list[dict[str, str]] = []
@@ -695,6 +709,7 @@ def build_coverage_matrix(
         policy_spec = policy_by_model.get(model, "")
         entry: dict[str, str] = {"model": model, "policy_hf": policy_spec or "not_on_hf"}
         missing_k: list[str] = []
+        model_missing_jobs: list[tuple[str, str, int]] = []
         for k in steps_list:
             # Prefer a row with a W&B URL if multiple hidden_maps exist for the same K.
             matches = [
@@ -714,9 +729,16 @@ def build_coverage_matrix(
                 entry[f"K={k}_wandb"] = ""
                 missing_k.append(str(k))
                 if policy_spec:
-                    missing_jobs.append((model, policy_spec, k))
+                    model_missing_jobs.append((model, policy_spec, k))
+        if (
+            exclude_missing_layouts
+            and _parse_model_meta(model)["layout"] in exclude_missing_layouts
+            and len(missing_k) == len(steps_list)
+        ):
+            continue
         entry["missing_K"] = ",".join(missing_k)
         matrix.append(entry)
+        missing_jobs.extend(model_missing_jobs)
     return matrix, missing_jobs
 
 
