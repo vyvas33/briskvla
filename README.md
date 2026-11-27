@@ -76,10 +76,10 @@ LIBERO success rate (%), 100 episodes per suite, seed 1000, `n_action_steps=10`.
 <tr><td>3</td><td>68.7</td><td>86.0</td><td>77.3</td><td>68.3</td><td>75.1</td></tr>
 <tr><td rowspan="2"><code>shallow_8L_late</code></td><td rowspan="2">Shallow (GT-only)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>8,9,10,11,12,13,14,15</code></td><td rowspan="2">2048</td><td rowspan="2">—</td><td>10</td><td>63</td><td>66</td><td>75</td><td>48</td><td>63.0</td></tr>
 <tr><td>3</td><td>56</td><td>71</td><td>77</td><td>47</td><td>62.8</td></tr>
-<tr><td rowspan="2"><code>student_8L_early_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,2,3,4,5,6,7</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>67</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-<tr><td>3</td><td>74</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-<tr><td rowspan="2"><code>student_8L_spread_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,4,5,8,9,12,13</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>63</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-<tr><td>3</td><td>72</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td rowspan="2"><code>student_8L_early_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,2,3,4,5,6,7</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>67</td><td>79</td><td>74</td><td>69</td><td>72.2</td></tr>
+<tr><td>3</td><td>74</td><td>90</td><td>77</td><td>69</td><td>77.5</td></tr>
+<tr><td rowspan="2"><code>student_8L_spread_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>0,1,4,5,8,9,12,13</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>63</td><td>84</td><td>74</td><td>66</td><td>71.8</td></tr>
+<tr><td>3</td><td>72</td><td>82</td><td>74</td><td>62</td><td>72.5</td></tr>
 <tr><td rowspan="2"><code>student_8L_late_shallow_pi</code></td><td rowspan="2">Distilled (+GT, no output loss)</td><td rowspan="2"><code>8L</code> (49.1M)</td><td rowspan="2"><code>8,9,10,11,12,13,14,15</code></td><td rowspan="2">2048</td><td rowspan="2"><code>same_depth</code></td><td>10</td><td>55</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
 <tr><td>3</td><td>56</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
 <tr><td rowspan="2"><code>student_8L_alternating_ffn_fused</code></td><td rowspan="2">Distilled + FFN Fusion</td><td rowspan="2"><code>8L</code> (84.5M)</td><td rowspan="2"><code>0,3,4,7,8,11,12,15</code></td><td rowspan="2">4096</td><td rowspan="2"><code>uniform</code></td><td>10</td><td>76</td><td>83</td><td>85</td><td>61</td><td>76.3</td></tr>
@@ -96,6 +96,6 @@ LIBERO success rate (%), 100 episodes per suite, seed 1000, `n_action_steps=10`.
 </tbody>
 </table>
 
-Shallow-π (`_shallow_pi`) models were evaluated on `libero_spatial` only.
+`student_8L_late_shallow_pi` was evaluated on `libero_spatial` only.
 
 The 95% confidence interval for a single 100-episode cell is roughly ±8–9 percentage points (about ±4–4.5 points for the 400-episode average).

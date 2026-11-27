@@ -303,7 +303,16 @@ Every trained model has 8 expert layers (`8L`), trained for 5000 steps at batch 
 | Student — 8L Alternating (matched drop) | 49.1M | 3 | 69 | 63 | 71 | 45 | 62.0 |
 | Student — 8L Spread | 49.1M | 3 | 51 | 72 | 66 | 42 | 57.8 |
 
-### Shallow-π (`libero_spatial` only) & Untrained Baselines
+### Shallow-π (`hidden_map=same_depth`)
+
+| Model | K | Spatial | Object | Goal | Long | Avg |
+|---|---|---|---|---|---|---|
+| Student — 8L Early, Shallow-π | 10 | 67 | 79 | 74 | 69 | 72.2 |
+| Student — 8L Spread, Shallow-π | 10 | 63 | 84 | 74 | 66 | 71.8 |
+| Student — 8L Early, Shallow-π | 3 | 74 | 90 | 77 | 69 | **77.5** |
+| Student — 8L Spread, Shallow-π | 3 | 72 | 82 | 74 | 62 | 72.5 |
+
+### Shallow-π `libero_spatial` (incl. Late and `K=1`) & Untrained Baselines
 
 | Model | K = 10 | K = 3 | K = 1 |
 |---|---|---|---|
